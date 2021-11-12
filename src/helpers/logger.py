@@ -16,7 +16,7 @@ class Logger:
             else:
                 self.dir = self.temp_dir()
                 
-            self.save_config(system_cfg)
+            self.save_config(system_cfg
             self.make_dir()
             self.log = self.make_logger()
             self.record = self.make_logger(record=True)
