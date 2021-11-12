@@ -1,15 +1,19 @@
 import torch
 import numpy as np
 
-from .helpers import DataHandler, BatchHandler
-from .models import BasicBertModel
-from .utils import no_grad
+from .helpers import ConvHandler, BatchHandler
+from .models import FlatTransModel, SpanModel
+from .utils import no_grad, toggle_grad, LossFunctions
 
 class ExperimentHandler:
     def __init__(self, system_cfg):        
-        self.D = DataHandler(system_cfg.punct, system_cfg.action)
-        self.B = BatchHandler(system_cfg.context, system_cfg.context_len)
-        self.model = BasicBertModel(len(self.D.act_id_dict))
+        self.D = ConvHandler(system_cfg.system, system_cfg.punct, system_cfg.action, system_cfg.debug)
+        self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len)
+        
+        if system_cfg.mode == 'full_context':
+            self.model = SpanModel(system_cfg.system, len(self.D.act_id_dict))
+        else:
+            self.model = FlatTransModel(system_cfg.system, len(self.D.act_id_dict))
 
         self.device = torch.device('cuda') if torch.cuda.is_available() \
                       else torch.device('cpu')
@@ -53,9 +57,9 @@ class ExperimentHandler:
 
     @no_grad
     def evaluate(self, mode='dev'):
-        if mode == 'dev': dataset = self.D.dev 
+        if   mode ==  'dev': dataset = self.D.dev 
         elif mode == 'test': dataset = self.D.test
-            
+        
         confusion_matrix = np.zeros([len(self.D.act_id_dict), len(self.D.act_id_dict)])
         for k, batch in enumerate(self.B.batches(dataset), start=1):
             y = self.model(batch.ids, batch.mask)

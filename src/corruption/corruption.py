@@ -61,3 +61,4 @@ def local_word_swaps(conversation, num_sents=1, num_word_swaps=1):
         sentence = ' '.join(words)
         incoherent[i] = sentence
     return incoherent
+

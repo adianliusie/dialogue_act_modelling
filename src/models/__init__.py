@@ -1,1 +1,2 @@
-from .basic_models import BasicBertModel
+from .basic_models import FlatTransModel
+from .contextual import SpanModel
