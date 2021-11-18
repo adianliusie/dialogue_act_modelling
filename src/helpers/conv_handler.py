@@ -1,4 +1,4 @@
-from transformers import BertTokenizerFast, RobertaTokenizerFast, BigBirdTokenizer, ReformerTokenizerFast
+from transformers import BertTokenizerFast, RobertaTokenizerFast, BigBirdTokenizer, ReformerTokenizerFast, AlbertTokenizerFast
 
 from types import SimpleNamespace
 import json
@@ -6,19 +6,19 @@ from tqdm import tqdm
 import string
 import re 
 
-BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_acts/swbd_data'
-
 def load_json(path):
     with open(path) as jsonFile:
         data = json.load(jsonFile)
     return data
 
 class ConvHandler:
-    def __init__(self, system=None, punct=True, action=True, debug=False):
+    def __init__(self, data_src, system=None, punct=True, action=True, debug=False):
+        self.set_up_paths(data_src)
+        
         train, dev, test = self.get_act_data()
         train, dev, test = [list(i.values()) for i in [train, dev, test]]
         
-        if debug:  train, dev, test = train[:50], dev[:50], test[:50]
+        if debug:  train, dev, test = train[:10], dev[:10], test[:10]
             
         Utterance.set_punct(punct)
         Utterance.set_action(action)
@@ -27,11 +27,19 @@ class ConvHandler:
         self.train = [Conversation(conv) for conv in tqdm(train)]
         self.dev = [Conversation(conv) for conv in dev]
         self.test = [Conversation(conv) for conv in test]
-        self.act_id_dict = load_json(f'{BASE_DIR}/swbd_act_dict.json')
-        self.act_names_dict = load_json(f'{BASE_DIR}/swbd_act_names.json')
 
+    def set_up_paths(self, data_src):
+        global BASE_DIR, act_id_dict, act_names_dict
+        if data_src == 'swbd':
+            BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_acts/act_data/swbd_act/data'
+        elif data_src == 'ami':
+            BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_acts/act_data/ami_act/data'
+        act_id_dict = load_json(f'{BASE_DIR}/act_dict.json')
+        act_names_dict = load_json(f'{BASE_DIR}/act_names.json')
+        self.act_id_dict = act_id_dict
+        
     def get_act_data(self):
-        paths = [f'{BASE_DIR}/swbd_act_{i}.json' for i in ['train', 'dev', 'test']]
+        paths = [f'{BASE_DIR}/act_{i}.json' for i in ['train', 'dev', 'test']]
         train, dev, test = [load_json(i) for i in paths]
         return (train, dev, test)
     
@@ -74,8 +82,6 @@ class Conversation:
         return self.utts[k]
 
 class Utterance:
-    act_id_dict = load_json(f'{BASE_DIR}/swbd_act_dict.json')
-    act_names_dict = load_json(f'{BASE_DIR}/swbd_act_names.json')
     tokenizer, punct, action = None, True, True
 
     def __init__(self, text, spkr, act=None):
@@ -85,18 +91,18 @@ class Utterance:
             self.text = re.sub("<.*?>", "", self.text).strip()
 
         if not self.punct: 
-            self.text = re.sub(r'[^\w\s]', '', self.text).lower().strip()
+            self.text = re.sub(r'[^\w\s]', '', self.text).strip()
 
         self.spkr = spkr
         
-        if hasattr(self, 'tokenizer') and self.tokenizer != None:
+        if self.tokenizer != None:
             self.ids = self.tokenizer(self.text).input_ids
         else:
             self.ids = [None]
             
         if act != None:
-            self.act = self.act_id_dict[act]
-            self.act_str = self.act_names_dict[act]
+            self.act = act_id_dict[act]
+            self.act_str = act_names_dict[act] if act in act_names_dict else None
             
     @classmethod
     def set_punct(cls, value):
@@ -108,16 +114,16 @@ class Utterance:
     
     @classmethod
     def set_system(cls, system):
-        if system in ['bert', 'electra']: 
+        if system in ['bert', 'electra', 'rand']: 
             cls.tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
         if system == 'bert_cased':
-            cls.tokenizer = BertTokenizer.from_pretrained('bert-base-cased')
+            cls.tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
         elif system == 'roberta': 
             cls.tokenizer = RobertaTokenizerFast.from_pretrained("roberta-base")
         elif system == 'big_bird': 
             cls.tokenizer = BigBirdTokenizer.from_pretrained('google/bigbird-roberta-base')
-        elif system == 'reformer': 
-            cls.tokenizer = ReformerTokenizerFast.from_pretrained('google/reformer-crime-and-punishment')
-
+        elif system == 'albert':
+            cls.tokenizer = AlbertTokenizerFast.from_pretrained('albert-base-v2')
+            
     def __repr__(self):
         return self.text

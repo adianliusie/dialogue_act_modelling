@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from transformers import BertConfig, BertModel, RobertaModel, ElectraModel, BigBirdModel, ReformerModel
+from transformers import BertConfig, BertModel, RobertaModel, ElectraModel, BigBirdModel, AlbertModel
 
 class FlatTransModel(nn.Module):
     def __init__(self, system, class_number=1):
@@ -20,7 +20,7 @@ def get_transformer(name):
     elif name ==    'roberta': transformer = RobertaModel.from_pretrained('roberta-base', return_dict=True)
     elif name ==    'electra': transformer = ElectraModel.from_pretrained('google/electra-base-discriminator', return_dict=True)
     elif name ==   'big_bird': transformer = BigBirdModel.from_pretrained('google/bigbird-roberta-base', return_dict=True)
-    elif name == 'reformer': transformer = ReformerModel.from_pretrained('google/reformer-crime-and-punishment', return_dict=True)
+    elif name ==     'albert': transformer = AlbertModel.from_pretrained('albert-base-v2', return_dict=True)
     elif name ==       'rand': transformer = BertModel(BertConfig(return_dict=True))
     else: raise Exception
     return transformer

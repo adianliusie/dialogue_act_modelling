@@ -1,13 +1,16 @@
 import torch
+import torch.nn.functional as F
 import numpy as np
+from sklearn.metrics import precision_recall_curve
 
-from .helpers import ConvHandler, BatchHandler
+from .helpers import ConvHandler, BatchHandler, Logger
 from .models import FlatTransModel, SpanModel
 from .utils import no_grad, toggle_grad, LossFunctions
 
 class ExperimentHandler:
-    def __init__(self, system_cfg):        
-        self.D = ConvHandler(system_cfg.system, system_cfg.punct, system_cfg.action, system_cfg.debug)
+    def __init__(self, system_cfg):
+        self.L = Logger(system_cfg)
+        self.D = ConvHandler(system_cfg.data_src, system_cfg.system, system_cfg.punct, system_cfg.action, system_cfg.debug)
         self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len)
         
         if system_cfg.mode == 'full_context':
@@ -20,6 +23,8 @@ class ExperimentHandler:
         self.cross_loss = torch.nn.CrossEntropyLoss()
 
     def train(self, config):
+        self.L.save_config('train_cfg', config)
+        
         optimizer = torch.optim.Adam(self.model.parameters(), lr=config.lr)
         if config.scheduling:
               SGD_steps = (len(train_data)*self.epochs)/config.bsz
@@ -60,35 +65,13 @@ class ExperimentHandler:
         if   mode ==  'dev': dataset = self.D.dev 
         elif mode == 'test': dataset = self.D.test
         
-        confusion_matrix = np.zeros([len(self.D.act_id_dict), len(self.D.act_id_dict)])
+        predicted_probs, labels = [], []
         for k, batch in enumerate(self.B.batches(dataset), start=1):
             y = self.model(batch.ids, batch.mask)
             loss = self.cross_loss(y, batch.labels)
-            
-            y_pred = torch.argmax(y, -1)
-            
-            for pred, lab in zip(y_pred, batch.labels):
-                confusion_matrix[lab, pred] += 1
+            pred_prob = F.softmax(y, dim=-1)
+            predicted_probs += pred_prob.cpu().tolist()
+            labels += batch.labels.cpu().tolist()
         
-        accuracy, precision, recall, label_dist = self.proc_matrix(confusion_matrix)
-        macro_F1, micro_F1 = self.get_F1(precision, recall, label_dist)
-        print(f'acc: {accuracy:.3f}  macro F1 {macro_F1:.3f}  micro F1 {micro_F1:.3f}')
-        return (accuracy, macro_F1, micro_F1)
+        return(predicted_probs, labels)
 
-    def proc_matrix(self, matrix):
-        true_positives = np.diagonal(matrix)
-        label_count    = np.sum(matrix, axis=1)
-        pred_count     = np.sum(matrix, axis=0)
-            
-        accuracy = sum(true_positives)/sum(label_count)
-        precision = true_positives/pred_count
-        recall = true_positives/label_count
-        label_dist = label_count/np.sum(label_count)
-        return (accuracy, precision, recall, label_dist)
-
-    def get_F1(self, precision, recall, label_dist):
-        F1 = 2*(precision*recall)/(precision+recall)
-        macro_F1 = np.mean(F1[~np.isnan(F1)])
-        micro_F1 = np.nansum(label_dist*F1)
-        return (macro_F1, micro_F1)
-    

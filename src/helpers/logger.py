@@ -3,10 +3,10 @@ import json
 import torch
 import shutil
 
-BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_act/results'
+BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_acts/results'
 
 class Logger:
-    def __init__(self, system_cfg, train_cfg, exp_name=None):
+    def __init__(self, system_cfg, exp_name=None):
         if system_cfg.load:
             pass
         else:
@@ -16,15 +16,15 @@ class Logger:
             else:
                 self.dir = self.temp_dir()
                 
-            self.save_config(system_cfg
-            self.make_dir()
+            self.make_dir(self.dir)
+            self.save_config('system_cfg', system_cfg)
             self.log = self.make_logger()
             self.record = self.make_logger(record=True)
             
     def temp_dir(self):
         temp_dir = f'{BASE_DIR}/temp'
-        shutil.rmtree(temp_dir)
-        return base_dir
+        if os.path.isdir(temp_dir): shutil.rmtree(temp_dir)
+        return temp_dir
         
     def get_dir(self, exp_name):
         return f'{BASE_DIR}/{exp_name}'
