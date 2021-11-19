@@ -85,14 +85,15 @@ class Utterance:
     tokenizer, punct, action = None, True, True
 
     def __init__(self, text, spkr, act=None):
-        self.text = ' '.join(text).strip()
+        self.text = text
         if not self.action:
-            self.text = re.sub("<<.*?>>", "", self.text).strip()
-            self.text = re.sub("<.*?>", "", self.text).strip()
+            self.text = re.sub("<<.*?>>", "", self.text)
+            self.text = re.sub("<.*?>", "", self.text)
 
         if not self.punct: 
-            self.text = re.sub(r'[^\w\s]', '', self.text).strip()
+            self.text = re.sub(r'[^\w\s]', '', self.text)
 
+        self.text = self.text.strip()
         self.spkr = spkr
         
         if self.tokenizer != None:
