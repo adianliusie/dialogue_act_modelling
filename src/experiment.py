@@ -9,20 +9,23 @@ from .utils import no_grad, toggle_grad, LossFunctions
 
 class ExperimentHandler:
     def __init__(self, system_cfg):
-        self.L = Logger(system_cfg)
+        self.L = Logger(system_cfg)               
         self.D = ConvHandler(system_cfg.data_src, system_cfg.system, system_cfg.punct, system_cfg.action, system_cfg.debug)
         self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len)
-        
+
         if system_cfg.mode == 'full_context':
             self.model = SpanModel(system_cfg.system, len(self.D.act_id_dict))
         else:
             self.model = FlatTransModel(system_cfg.system, len(self.D.act_id_dict))
 
-        self.device = torch.device('cuda') if torch.cuda.is_available() \
+        self.device = torch.device(system_cfg.device) if torch.cuda.is_available() \
                       else torch.device('cpu')
+        
         self.cross_loss = torch.nn.CrossEntropyLoss()
 
     def train(self, config):
+        self.to_device()
+
         self.L.save_config('train_cfg', config)
         
         optimizer = torch.optim.Adam(self.model.parameters(), lr=config.lr)
@@ -31,9 +34,6 @@ class ExperimentHandler:
               lambda1 = lambda i: 10*i/SGD_steps if i <= SGD_steps/10 else 1 - ((i - 0.1*SGD_steps)/(0.9*SGD_steps))
               scheduler = LambdaLR(optimizer, lr_lambda=lambda1)
 
-        self.model.to(self.device)
-        self.B.to(self.device)
-        
         best_metric = 0
         for epoch in range(config.epochs):
             logger = np.zeros(3)
@@ -54,14 +54,16 @@ class ExperimentHandler:
                 logger[2] += len(batch.labels)
 
                 if k%config.print_len == 0:
-                    print(f'{k:<5}  {logger[0]/config.print_len:.3f}    {logger[1]/logger[2]:.3f}')
+                    self.L.log(f'{k:<5}  {logger[0]/config.print_len:.3f}    {logger[1]/logger[2]:.3f}')
                     logger = np.zeros(3)
                 
-            self.evaluate(mode='dev')
-            self.evaluate(mode='test')
-
+            preds, labels = self.evaluate(mode='dev')
+            
+            
     @no_grad
     def evaluate(self, mode='dev'):
+        self.to_device()
+
         if   mode ==  'dev': dataset = self.D.dev 
         elif mode == 'test': dataset = self.D.test
         
@@ -75,3 +77,14 @@ class ExperimentHandler:
         
         return(predicted_probs, labels)
 
+    def save_model(self, name):
+        self.model.to("cpu")
+        torch.save(self.model.state_dict(), f'{self.L.path}/models/{name}.pt')
+        
+    def load_model(self, name):
+        self.model.load_state_dict(torch.load(self.L.path + f'/models/{name}.pt'))
+
+    def to_device(self):
+        self.model.to(self.device)
+        self.B.to(self.device)
+        

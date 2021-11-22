@@ -6,10 +6,7 @@ from tqdm import tqdm
 import string
 import re 
 
-def load_json(path):
-    with open(path) as jsonFile:
-        data = json.load(jsonFile)
-    return data
+from ..utils import load_json
 
 class ConvHandler:
     def __init__(self, data_src, system=None, punct=True, action=True, debug=False):
@@ -52,16 +49,15 @@ class Conversation:
     def make_turns(self):
         turns = []
         prev_speaker = None
-        turn = {'text':'', 'ids':[], 'acts':[], 'spkr':None}
+        turn = {'text':'', 'ids':[], 'segs':[], 'acts':[], 'spkr':None}
 
         for utt in self.utts:
-            if utt.spkr != prev_speaker:
-                if len(turn['ids'])>0:
+            if utt.spkr != prev_speaker:                    
+                if len(turn['text'])>0:
                     turn['ids'] = [Utterance.tokenizer.cls_token_id] \
                                 + turn['ids'] + [Utterance.tokenizer.sep_token_id]
-                if len(turn['text'])>0:
                     turns.append(SimpleNamespace(**turn)) 
-                turn = {'text':'', 'ids':[], 'acts':[], 'spkr':utt.spkr}
+                turn = {'text':'', 'ids':[], 'segs':[], 'acts':[], 'spkr':None}
                 
             turn['text'] += ' ' + utt.text
             turn['ids'] += utt.ids[1:-1]
