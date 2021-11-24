@@ -1,5 +1,6 @@
-from sklearn.metrics import precision_recall_curve
 from sklearn.calibration import calibration_curve
+from sklearn import metrics
+
 import matplotlib.pyplot as plt
 import matplotlib.cm as cm
 import seaborn as sns
@@ -21,15 +22,33 @@ class MutliClassEval:
             classes.append(BinaryEval(class_preds, class_labels))
         return classes
 
-    def max_prob_eval(self):
-        class_array = np.zeros([2, self.num_classes])
-        for pred, lab in zip(self.preds, self.labels):
-            class_array[0, lab] += (max(pred) == pred[lab])
-            class_array[1, lab] += 1
-        acc = np.sum(class_array[0])/np.sum(class_array[1])
-        class_acc = class_array[0]/class_array[1]
-        avg_acc = np.nanmean(class_acc)
-        print(f'accuracy using max prob: {acc:.3f}')
+    def classification_report(self, detail=False, names=None):
+        decision = np.argmax(self.preds, axis=-1)
+        labels = self.labels
+        
+        if (names and detail):
+            decision = [names[i] for i in decision]
+            labels = [names[i] for i in labels]
+
+        report = metrics.classification_report(labels, decision, digits=3)  
+        
+        rows = report.split('\n')
+        header = rows[0]
+        summary = '\n'.join(rows[-4:-1])
+        
+        print(header)
+        if detail:
+            report = metrics.classification_report(labels, decision, digits=3, output_dict=True)  
+            results = [[k, v['precision'], v['recall'], v['f1-score'], v['support']] \
+                       for k, v in report.items() if k not in ['weighted avg', 'macro avg', 'accuracy']] 
+            results.sort(key=lambda x: x[3], reverse=True)
+            
+            width=max([len(x[0]) for x in results])
+            for row in results:
+                print(f' {row[0]:>{width}} {row[1]:>9.3f} {row[2]:>9.3f} {row[3]:>9.3f} {row[4]:>9}')
+            print()
+            
+        print(summary)
         
     def op_point_eval(self):
         hits_dist, score_thresh = [], 0
@@ -99,7 +118,7 @@ class BinaryEval:
         ax.set_xlim(0,1), ax.set_ylim(0,1.02)
 
     def PR(self):
-        precision, recall, thresholds = precision_recall_curve(self.labels, self.preds)
+        precision, recall, thresholds = metrics.precision_recall_curve(self.labels, self.preds)
         return (precision, recall, thresholds)
 
     def calibration(self):

@@ -6,7 +6,7 @@ from tqdm import tqdm
 import string
 import re 
 
-from ..utils import load_json
+from src.utils import load_json
 
 class ConvHandler:
     def __init__(self, data_src, system=None, punct=True, action=True, debug=False):
@@ -33,13 +33,16 @@ class ConvHandler:
             BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_acts/act_data/ami_act/data'
         act_id_dict = load_json(f'{BASE_DIR}/act_dict.json')
         act_names_dict = load_json(f'{BASE_DIR}/act_names.json')
+        
         self.act_id_dict = act_id_dict
+        self.act_names = act_names_dict
+        self.id_to_act = {ind:act_names_dict[code] for code, ind in act_id_dict.items()}
         
     def get_act_data(self):
         paths = [f'{BASE_DIR}/act_{i}.json' for i in ['train', 'dev', 'test']]
         train, dev, test = [load_json(i) for i in paths]
         return (train, dev, test)
-    
+
 class Conversation:
     def __init__(self, data):
         self.data = data
@@ -58,10 +61,11 @@ class Conversation:
                                 + turn['ids'] + [Utterance.tokenizer.sep_token_id]
                     turns.append(SimpleNamespace(**turn)) 
                 turn = {'text':'', 'ids':[], 'segs':[], 'acts':[], 'spkr':None}
-                
+                    
             turn['text'] += ' ' + utt.text
             turn['ids'] += utt.ids[1:-1]
             turn['acts'].append(utt.act)
+            turn['segs'].append(len(turn['ids'])+1)
             prev_speaker = utt.spkr
             
         if len(turn['ids'])>0:
@@ -124,3 +128,5 @@ class Utterance:
             
     def __repr__(self):
         return self.text
+
+D = ConvHandler('ami', 'bert', debug=True)

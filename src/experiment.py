@@ -13,7 +13,8 @@ class ExperimentHandler:
         self.D = ConvHandler(system_cfg.data_src, system_cfg.system, system_cfg.punct, system_cfg.action, system_cfg.debug)
         self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len)
 
-        if system_cfg.mode == 'full_context':
+        self.mode = system_cfg.mode
+        if self.mode == 'full_context':
             self.model = SpanModel(system_cfg.system, len(self.D.act_id_dict))
         else:
             self.model = FlatTransModel(system_cfg.system, len(self.D.act_id_dict))
@@ -58,7 +59,8 @@ class ExperimentHandler:
                     logger = np.zeros(3)
                 
             preds, labels = self.evaluate(mode='dev')
-            
+            decision = np.argmax(preds, axis=-1)
+            self.L.log(sum(decision==labels)/len(decision))
             
     @no_grad
     def evaluate(self, mode='dev'):
