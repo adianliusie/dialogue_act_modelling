@@ -1,5 +1,10 @@
 import torch
 
+def context_mask(past=0, future=0):
+    lower = torch.tril(torch.ones([x,x]), diagonal=future)
+    upper = torch.triu(torch.ones([x,x]), diagonal=-past)
+    return lower*upper
+
 def no_grad(func):
     def inner(*args, **kwargs):
         with torch.no_grad():

@@ -4,26 +4,38 @@ import numpy as np
 from sklearn.metrics import precision_recall_curve
 
 from .helpers import ConvHandler, BatchHandler, Logger
-from .models import FlatTransModel, SpanModel
+from .models import FlatTransModel, SpanModel, HierModel
 from .utils import no_grad, toggle_grad, LossFunctions
 
 class ExperimentHandler:
     def __init__(self, system_cfg):
-        self.L = Logger(system_cfg)               
-        self.D = ConvHandler(system_cfg.data_src, system_cfg.system, system_cfg.punct, system_cfg.action, system_cfg.debug)
+        self.L = Logger(system_cfg)  
+        #if system_cfg: system_cfg = self.L.system_cfg
+        self.D = ConvHandler(system_cfg.data_src, system_cfg.system, system_cfg.punct, system_cfg.action, system_cfg.debug, 
+                             system_cfg.class_reduct)
         self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len)
 
         self.mode = system_cfg.mode
-        if self.mode == 'full_context':
-            self.model = SpanModel(system_cfg.system, len(self.D.act_id_dict))
-        else:
-            self.model = FlatTransModel(system_cfg.system, len(self.D.act_id_dict))
+        num_classes = max(self.D.act_id_dict.values())+1
+        if self.mode in ['independent', 'back_history']:
+            self.model = FlatTransModel(system_cfg.system, num_classes)
+        elif self.mode == 'hier':
+            self.model = HierModel(system_cfg.system, num_classes, system_cfg.decoder, system_cfg.layers)
+        elif self.mode == 'full_context':
+            self.model = SpanModel(system_cfg.system, num_classes)
 
         self.device = torch.device(system_cfg.device) if torch.cuda.is_available() \
                       else torch.device('cpu')
         
         self.cross_loss = torch.nn.CrossEntropyLoss()
 
+    def model_output(self, batch):
+        if self.mode in ['independent', 'back_history', 'hier']: 
+            y = self.model(batch.ids, batch.mask)
+        elif self.mode in ['full_context']: 
+            y = self.model(batch.ids, batch.info)
+        return y
+    
     def train(self, config):
         self.to_device()
 
@@ -40,7 +52,7 @@ class ExperimentHandler:
             logger = np.zeros(3)
 
             for k, batch in enumerate(self.B.batches(self.D.train, config.bsz), start=1):
-                y = self.model(batch.ids, batch.mask)
+                y = self.model_output(batch)
                 loss = self.cross_loss(y, batch.labels)
 
                 optimizer.zero_grad()
@@ -60,8 +72,15 @@ class ExperimentHandler:
                 
             preds, labels = self.evaluate(mode='dev')
             decision = np.argmax(preds, axis=-1)
-            self.L.log(sum(decision==labels)/len(decision))
+            acc = sum(decision==labels)/len(decision)
             
+            if acc > best_metric:
+                self.save_model('best_epoch')
+                best_metric = acc
+            self.L.log(acc)
+            
+        self.load_model('best_epoch')
+        
     @no_grad
     def evaluate(self, mode='dev'):
         self.to_device()
@@ -71,7 +90,7 @@ class ExperimentHandler:
         
         predicted_probs, labels = [], []
         for k, batch in enumerate(self.B.batches(dataset), start=1):
-            y = self.model(batch.ids, batch.mask)
+            y = self.model_output(batch)
             loss = self.cross_loss(y, batch.labels)
             pred_prob = F.softmax(y, dim=-1)
             predicted_probs += pred_prob.cpu().tolist()
@@ -80,9 +99,11 @@ class ExperimentHandler:
         return(predicted_probs, labels)
 
     def save_model(self, name):
+        device = next(self.model.parameters()).device
         self.model.to("cpu")
         torch.save(self.model.state_dict(), f'{self.L.path}/models/{name}.pt')
-        
+        self.model.to(device)
+
     def load_model(self, name):
         self.model.load_state_dict(torch.load(self.L.path + f'/models/{name}.pt'))
 

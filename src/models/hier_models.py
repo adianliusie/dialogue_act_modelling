@@ -1,71 +1,71 @@
 import torch
 import torch.nn as nn
 from transformers import BertConfig, BertModel, RobertaModel, ElectraModel
+from types import SimpleNamespace #TEMP
 
-from ..helpers.tokenizer import get_embeddings
-from .model_utils import Attention, get_transformer 
+from src.models.model_utils import Attention, get_transformer 
 
 class HierModel(nn.Module):
-    def __init__(self, system, pooling='first'):  
+    def __init__(self, system, class_num, decoder='baseline', layers=1):  
         super().__init__()
-        self.first_encoder = TransEncoder(system) 
-
+        self.utt_encoder = get_transformer(system)
+        self.conv_encoder = Decoder(system=decoder, layers=layers)
+        
+        self.pooling = self.get_pooling()           #self.get_pooling(pooling)
+        self.classifier = nn.Linear(768, class_num)
+        
+    def get_pooling(self, pooling='first'):
         if pooling == 'attention':
             self.attention = Attention(768)
-            self.pooling = lambda ids, mask=None: self.attention(ids, mask)
+            pooling_fn = lambda ids, mask=None: self.attention(ids, mask)
         elif pooling == 'first':
-            self.pooling = lambda ids, mask: ids[:,0]
-        
-        if True: self.second_encoder = HierTransEncoder(768) 
-        else:    self.second_encoder = HierBilstmEncoder(768) 
-
-        if True:
-            self.attention_2 = Attention(768)
-            self.pooling_2 = lambda ids: self.attention(ids)
-        else:
-            self.pooling_2 = lambda ids: ids[:,0]
-
-        self.classifier = nn.Linear(768, 1)
-
+            pooling_fn = lambda ids, mask: ids[:,0]
+        return pooling_fn  
+    
     def forward(self, x, mask):
-        H1 = self.first_encoder(x, mask)
-        h = self.pooling(H1, mask)
-        H2 = self.second_encoder(h)
-        h2 = self.pooling_2(H2)
-        y = self.classifier(h2)
+        H1 = self.utt_encoder(x, mask).last_hidden_state #encoder
+        h = self.pooling(H1, mask).unsqueeze(0)
+        h2 = self.conv_encoder(h)
+        y = self.classifier(h2).squeeze(0)
         return y
 
-class TransEncoder(nn.Module):
-    def __init__(self, name):
+class Decoder(nn.Module):
+    def __init__(self, system, layers):
         super().__init__()
-        self.transformer = get_transformer(name)
+        print(system)
+        if system   == 'baseline'    : self.baseline()
+        elif system == 'bilstm'      : self.bilstm(layers)
+        elif system == 'transformer' : self.transformer(layers)
+        elif system == 'attention'   : self.self_attention()
+        elif system == 'ctx_atten'   : self.context_attention()
 
-    def forward(self, x, mask):
-        H1 = self.transformer(input_ids=x, attention_mask=mask).last_hidden_state
-        return H1
-
-class HierTransEncoder(nn.Module):
-    def __init__(self, hsz=768):
-        super().__init__()
-        heads = hsz//64
-        config = BertConfig(hidden_size=hsz, num_hidden_layers=2, num_attention_heads=heads, 
-                            intermediate_size=4*hsz, return_dict=True)
-        self.transformer = BertModel(config)
-
-    def forward(self, x):
-        H1 = self.transformer(inputs_embeds=x).last_hidden_state
-        return H1 
-
-class HierBilstmEncoder(nn.Module):
-    def __init__(self, hsz=768):
-        super().__init__()
-        self.bilstm = nn.LSTM(input_size=hsz, hidden_size=hsz//2, num_layers=2, bias=True, 
-                              batch_first=True, dropout=0, bidirectional=True)
+    def baseline(self):
+        self.forward = lambda x: x
         
-    def forward(self, x):
-        H1, _ = self.bilstm(x)
-        return H1
+    def bilstm(self, layers):
+        self.model = nn.LSTM(input_size=768, hidden_size=768//2, num_layers=1, bias=True, 
+                             batch_first=True, dropout=0, bidirectional=True)  
+        self.forward = lambda x: self.model(x)[0]
+ 
+    def transformer(self, layers):
+        config = BertConfig(hidden_size=768, num_hidden_layers=layers, num_attention_heads=768//64, 
+                            intermediate_size=4*768, return_dict=True)
+        self.model = BertModel(config)
+        self.forward = lambda x: self.model(inputs_embeds=x).last_hidden_state
+
+    def self_attention(self):
+        self.model = nn.MultiheadAttention(embed_dim=768, num_heads=1)
+        self.forward = lambda x: self.model(x, x, x)[0]
+
+    def context_attention(self):
+        def context_mask(x, past=5, future=2):
+            x_len = len(x)
+            lower = torch.tril(torch.ones([x_len,x_len], device=x.device), diagonal=future)
+            upper = torch.triu(torch.ones([x_len,x_len], device=x.device), diagonal=-past)
+            return lower*upper
+
+        self.model = nn.MultiheadAttention(embed_dim=768, num_heads=1)
+        self.forward = lambda x: self.model(x, x, x, attn_mask=context_mask(x))[0]
 
 
-
-
+        

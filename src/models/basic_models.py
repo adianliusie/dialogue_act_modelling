@@ -4,10 +4,10 @@ import torch.nn as nn
 from .model_utils import get_transformer
 
 class FlatTransModel(nn.Module):
-    def __init__(self, system, class_number=1):
+    def __init__(self, system, class_num=1):
         super().__init__()
         self.transformer = get_transformer(system)
-        self.classifier = nn.Linear(768, class_number)
+        self.classifier = nn.Linear(768, class_num)
 
     def forward(self, x, mask):
         h1 = self.transformer(input_ids=x, attention_mask=mask).last_hidden_state[:,0]

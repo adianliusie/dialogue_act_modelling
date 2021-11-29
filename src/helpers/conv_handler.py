@@ -9,8 +9,8 @@ import re
 from src.utils import load_json
 
 class ConvHandler:
-    def __init__(self, data_src, system=None, punct=True, action=True, debug=False):
-        self.set_up_paths(data_src)
+    def __init__(self, data_src, system=None, punct=True, action=True, debug=False, class_reduct=False):
+        self.set_up_paths(data_src, class_reduct)
         
         train, dev, test = self.get_act_data()
         train, dev, test = [list(i.values()) for i in [train, dev, test]]
@@ -25,15 +25,20 @@ class ConvHandler:
         self.dev = [Conversation(conv) for conv in dev]
         self.test = [Conversation(conv) for conv in test]
 
-    def set_up_paths(self, data_src):
+    def set_up_paths(self, data_src, class_reduct=False):
         global BASE_DIR, act_id_dict, act_names_dict
         if data_src == 'swbd':
             BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_acts/act_data/swbd_act/data'
         elif data_src == 'ami':
             BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_acts/act_data/ami_act/data'
-        act_id_dict = load_json(f'{BASE_DIR}/act_dict.json')
-        act_names_dict = load_json(f'{BASE_DIR}/act_names.json')
         
+        if not class_reduct:
+            act_id_dict = load_json(f'{BASE_DIR}/act_dict.json')
+            act_names_dict = load_json(f'{BASE_DIR}/act_names.json')
+        elif class_reduct:
+            act_id_dict = load_json(f'{BASE_DIR}/act_dict_red.json')
+            act_names_dict = load_json(f'{BASE_DIR}/act_names_red.json')
+
         self.act_id_dict = act_id_dict
         self.act_names = act_names_dict
         self.id_to_act = {ind:act_names_dict[code] for code, ind in act_id_dict.items()}
@@ -128,5 +133,3 @@ class Utterance:
             
     def __repr__(self):
         return self.text
-
-D = ConvHandler('ami', 'bert', debug=True)

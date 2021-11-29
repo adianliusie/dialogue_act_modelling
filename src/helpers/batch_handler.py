@@ -7,29 +7,34 @@ class BatchHandler:
     def __init__(self, mode, mode_args, max_len=None):
         self.device = torch.device('cpu')
         self.mode = mode
-        self.prepare_fn = prep_ids(mode, mode_args)
+        self.prepare_fn = prep_fn(mode, mode_args)
         self.max_len = max_len
     
     def batches(self, data, bsz=8):
+        if self.mode in ['independent', 'back_history']: 
+            output = self.batches_indep(data, bsz)
+        if self.mode == 'hier': 
+            output = self.batches_hier(data)
+        return output
+    
+    def batches_indep(self, data, bsz=8):
         examples = self.prepare_fn(data)
         random.shuffle(examples)
+        batches = [examples[i:i+bsz] for i in range(0,len(examples), bsz)]
+        batches = [self.batchify(batch) for batch in batches] 
+        batches = [batch for batch in batches if len(batch.ids[0]) <= self.max_len]        
+        return batches
 
-        if self.mode == 'full_context':
-            batches = [conv for conv in examples if len(conv[0])<self.max_len]
-            batches = [self.batchify_flat(conv) for conv in examples]        
-        else:
-            batches = [examples[i:i+bsz] for i in range(0,len(examples), bsz)]
-            batches = [self.batchify(batch) for batch in batches]          
+    def batches_hier(self, data):
+        examples = utt_hier_fn(data)
+        random.shuffle(examples)
+        examples = [conv[:self.max_len] for conv in examples]
+        batches  = [self.batchify(conv) for conv in examples]        
+        batches  = [batch for batch in batches if len(batch.ids[0]) <= self.max_len]        
         return batches
     
-    def batchify_flat(self, batch):
-        ids, labels, info = batch
-        ids = torch.LongTensor(ids).to(self.device)
-        labels = torch.LongTensor(labels).to(self.device)
-        return SimpleNamespace(ids=ids, mask=info, labels=labels)
-
     def batchify(self, batch):
-        ids, labels = zip(*batch)
+        ids, labels = zip(*batch)    
         max_len = max([len(x) for x in ids])
         padded_ids = [x + [0]*(max_len-len(x)) for x in ids]
         mask = [[1]*len(x) + [0]*(max_len-len(x)) for x in ids]
@@ -38,22 +43,59 @@ class BatchHandler:
         labels = torch.LongTensor(labels).to(self.device)
         return SimpleNamespace(ids=ids, mask=mask, labels=labels)
 
+    def batches_conv(self, batch):
+        examples = self.prepare_fn(data)
+        random.shuffle(examples)
+        batches = [conv for conv in examples if len(conv[0])<self.max_len]
+        batches = [self.batchify_flat(conv) for conv in examples]        
+        
+    def batchify_flat(self, batch):
+        ids, labels, info = batch
+        ids = torch.LongTensor(ids).to(self.device)
+        labels = torch.LongTensor(labels).to(self.device)
+        return SimpleNamespace(ids=ids, mask=info, labels=labels)
+
     def to(self, device):
         self.device = device
 
-    def shorten_doc(self, document):
-        document = document.copy()
+    def shorten_doc(self, conv):
+        conv = conv.copy()
         if self.max_len != None:
             while len([word for sent in document for word in sent[1:-1]]) > self.max_len:
                 document.pop(-1)
         return document
     
-def prep_ids(mode, arg):
-    if mode == 'independent' : func = independent()
+def prep_fn(mode, arg):
+    if mode == 'independent' : func = independent_fn
     if mode == 'back_history': func = back_history(arg)
-    if mode == 'full_context': func = utt_flat()
-    if mode == 'hier'        : func = utt_hier()
+    if mode == 'hier'        : func = utt_hier_fn
     return func
+
+def independent_fn(data):
+    output = []
+    for conv in data:
+        for utt in conv:
+            output.append([utt.ids, utt.act])
+    return output
+
+def back_history(context_len=5):
+    def back_history_fn(data):
+        output, context = [], []
+        for conv in data:
+            for utt in conv:
+                context_ids = [i for u in context for i in u[1:-1]]
+                ids = context_ids + utt.ids 
+                output.append([ids, utt.act])
+                context.append(utt.ids)
+                context = context[-context_len:].copy()
+        return output
+    return back_history_fn
+
+def utt_hier_fn(data):
+    output = []
+    for conv in data:
+        output.append([[utt.ids, utt.act] for utt in conv.utts])
+    return output
 
 def utt_flat():
     utt_hier_fn = utt_hier()
@@ -68,36 +110,3 @@ def utt_flat():
             output.append([flat_conv, labels, span_segments])
         return output
     return utt_flat_fn
-
-def utt_hier():
-    def utt_hier_fn(data):
-        output = []
-        for conv in data:
-            if len(conv.turns) > 1:
-                turns = [utt.ids for utt in conv.utts]
-                labels = [utt.act for utt in conv.utts]
-                output.append([turns, labels])
-        return output
-    return utt_hier_fn
-        
-def independent():
-    def independent_fn(data):
-        output = []
-        for conv in data:
-            for utt in conv:
-                output.append([utt.ids, utt.act])
-        return output
-    return independent_fn
-
-def back_history(context_len=5):
-    def back_history_fn(data):
-        output, context = [], []
-        for conv in data:
-            for utt in conv:
-                context_ids = [i for u in context for i in u[1:-1]]
-                ids = context_ids + utt.ids 
-                output.append([ids, utt.act])
-                context.append(utt.ids)
-                context = context[-context_len:].copy()
-        return output
-    return back_history_fn

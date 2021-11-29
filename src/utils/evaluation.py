@@ -38,6 +38,7 @@ class MutliClassEval:
         
         print(header)
         if detail:
+            #This is all done to be able to sort by F1 (can change index to sort by P,R or support)
             report = metrics.classification_report(labels, decision, digits=3, output_dict=True)  
             results = [[k, v['precision'], v['recall'], v['f1-score'], v['support']] \
                        for k, v in report.items() if k not in ['weighted avg', 'macro avg', 'accuracy']] 
@@ -47,7 +48,6 @@ class MutliClassEval:
             for row in results:
                 print(f' {row[0]:>{width}} {row[1]:>9.3f} {row[2]:>9.3f} {row[3]:>9.3f} {row[4]:>9}')
             print()
-            
         print(summary)
         
     def op_point_eval(self):
@@ -71,6 +71,7 @@ class MutliClassEval:
         colors = cm.rainbow(np.linspace(0, 1, len(self.class_perfs)))
 
         ax = iso_F1()
+        print(colors)
         ax.scatter(precisions, recalls, color=colors, marker='x')
         plt.show()
     
