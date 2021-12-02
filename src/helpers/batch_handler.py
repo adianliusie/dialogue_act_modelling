@@ -11,15 +11,16 @@ class BatchHandler:
         self.max_len = max_len
     
     def batches(self, data, bsz=8):
-        if self.mode in ['independent', 'back_history']: 
+        if self.mode in ['independent', 'back_history', 'context']: 
             output = self.batches_indep(data, bsz)
-        if self.mode == 'hier': 
+        if self.mode in ['hier', 'auto_regressive']: 
             output = self.batches_hier(data)
         return output
     
     def batches_indep(self, data, bsz=8):
         examples = self.prepare_fn(data)
         random.shuffle(examples)
+        examples = [conv[:100] for conv in examples] #TEMP
         batches = [examples[i:i+bsz] for i in range(0,len(examples), bsz)]
         batches = [self.batchify(batch) for batch in batches] 
         batches = [batch for batch in batches if len(batch.ids[0]) <= self.max_len]        
@@ -64,11 +65,12 @@ class BatchHandler:
             while len([word for sent in document for word in sent[1:-1]]) > self.max_len:
                 document.pop(-1)
         return document
-    
+
 def prep_fn(mode, arg):
     if mode == 'independent' : func = independent_fn
     if mode == 'back_history': func = back_history(arg)
-    if mode == 'hier'        : func = utt_hier_fn
+    if mode == 'context'     : func = context(*arg)
+    if mode in ['hier', 'auto_regressive']: func = utt_hier_fn
     return func
 
 def independent_fn(data):
@@ -90,6 +92,18 @@ def back_history(context_len=5):
                 context = context[-context_len:].copy()
         return output
     return back_history_fn
+
+def context(past=3, future=3):
+    def context_fn(data):
+        output, context = [], []
+        for conv in data:
+            for i, cur_utt in enumerate(conv.utts):
+                past_utts = [tok for utt in conv.utts[max(i-past, 0):i] for tok in utt.ids[1:-1]]
+                future_utts = [tok for utt in conv.utts[i+1:i+future+1] for tok in utt.ids[1:-1]]
+                ids = past_utts + cur_utt.ids + future_utts
+                output.append([ids, cur_utt.act])
+        return output
+    return context_fn
 
 def utt_hier_fn(data):
     output = []

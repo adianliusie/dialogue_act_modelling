@@ -3,7 +3,7 @@ import torch.nn as nn
 from transformers import BertConfig, BertModel, RobertaModel, ElectraModel
 from types import SimpleNamespace #TEMP
 
-from src.models.model_utils import Attention, get_transformer 
+from .model_utils import Attention, get_transformer 
 
 class HierModel(nn.Module):
     def __init__(self, system, class_num, decoder='baseline', layers=1):  
@@ -34,6 +34,7 @@ class Decoder(nn.Module):
         super().__init__()
         print(system)
         if system   == 'baseline'    : self.baseline()
+        if system   == 'fcc'         : self.fcc()
         elif system == 'bilstm'      : self.bilstm(layers)
         elif system == 'transformer' : self.transformer(layers)
         elif system == 'attention'   : self.self_attention()
@@ -41,7 +42,11 @@ class Decoder(nn.Module):
 
     def baseline(self):
         self.forward = lambda x: x
-        
+
+    def fcc(self):
+        self.model = nn.Linear(768, 768)
+        self.forward = lambda x: self.model(x)
+
     def bilstm(self, layers):
         self.model = nn.LSTM(input_size=768, hidden_size=768//2, num_layers=1, bias=True, 
                              batch_first=True, dropout=0, bidirectional=True)  
@@ -67,5 +72,41 @@ class Decoder(nn.Module):
         self.model = nn.MultiheadAttention(embed_dim=768, num_heads=1)
         self.forward = lambda x: self.model(x, x, x, attn_mask=context_mask(x))[0]
 
+class AutoRegressive(nn.Module):
+    def __init__(self, system, class_num):  
+        super().__init__()
+        self.class_num = class_num
+        self.utt_encoder = get_transformer(system)
+        self.embedding = nn.Embedding(class_num, 4)
+        self.decoder = nn.LSTM(input_size=772, hidden_size=772, num_layers=1, bias=True, 
+                               batch_first=True, dropout=0, bidirectional=False)
+        self.pooling = lambda ids, mask: ids[:,0]
+        self.classifier = nn.Linear(772, class_num)
 
+    def forward(self, ids, mask, y):
+        H1 = self.utt_encoder(ids, mask).last_hidden_state #encoder
+        h = self.pooling(H1, mask).unsqueeze(0)
+        y_inp = torch.roll(y, shifts=1, dims=0).unsqueeze(0)
+        y_embed = self.embedding(y_inp)
+        y_embed[0, 0, :] = 0
+        h2 = torch.cat((h, y_embed), -1)
+        h3 = self.decoder(h2)[0]
+        y = self.classifier(h3).squeeze(0)
+        return y
+
+    def decode(self, ids, mask):
+        H1 = self.utt_encoder(ids, mask).last_hidden_state #encoder
+        H = self.pooling(H1, mask)
         
+        y_embed = torch.zeros(4, device=H.device)
+        hn = cn = torch.zeros(1, 1, 772, device=H.device)
+        output = torch.zeros([len(H), self.class_num], device=H.device)
+        for k, h in enumerate(H):
+            inp = torch.cat((h, y_embed), -1).unsqueeze(0).unsqueeze(0)
+            h_out, (hn,cn) = self.decoder(inp, (hn,cn))
+            y = self.classifier(h_out.squeeze(0))
+            pred = torch.argmax(y, dim=-1).squeeze(0)
+            pred[pred != -100] = 1
+            y_embed = self.embedding(pred)
+            output[k,:] = y.clone()
+        return output

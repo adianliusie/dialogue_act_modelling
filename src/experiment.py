@@ -4,36 +4,42 @@ import numpy as np
 from sklearn.metrics import precision_recall_curve
 
 from .helpers import ConvHandler, BatchHandler, Logger
-from .models import FlatTransModel, SpanModel, HierModel
+from .models import FlatTransModel, SpanModel, HierModel, AutoRegressive
 from .utils import no_grad, toggle_grad, LossFunctions
 
 class ExperimentHandler:
     def __init__(self, system_cfg):
-        self.L = Logger(system_cfg)  
-        #if system_cfg: system_cfg = self.L.system_cfg
+        self.L = Logger(system_cfg) 
+        if system_cfg.load: system_cfg = self.L.system_cfg
         self.D = ConvHandler(system_cfg.data_src, system_cfg.system, system_cfg.punct, system_cfg.action, system_cfg.debug, 
                              system_cfg.class_reduct)
         self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len)
 
         self.mode = system_cfg.mode
         num_classes = max(self.D.act_id_dict.values())+1
-        if self.mode in ['independent', 'back_history']:
+        if self.mode in ['independent', 'back_history', 'context']:
             self.model = FlatTransModel(system_cfg.system, num_classes)
         elif self.mode == 'hier':
             self.model = HierModel(system_cfg.system, num_classes, system_cfg.decoder, system_cfg.layers)
         elif self.mode == 'full_context':
             self.model = SpanModel(system_cfg.system, num_classes)
+        elif self.mode == 'auto_regressive':
+            self.model = AutoRegressive(system_cfg.system, num_classes)
 
         self.device = torch.device(system_cfg.device) if torch.cuda.is_available() \
                       else torch.device('cpu')
         
         self.cross_loss = torch.nn.CrossEntropyLoss()
 
-    def model_output(self, batch):
-        if self.mode in ['independent', 'back_history', 'hier']: 
+    def model_output(self, batch, train=True):
+        if self.mode in ['independent', 'back_history', 'context', 'hier']: 
             y = self.model(batch.ids, batch.mask)
         elif self.mode in ['full_context']: 
             y = self.model(batch.ids, batch.info)
+        elif self.mode in ['auto_regressive']: 
+            if train: y = self.model(batch.ids, batch.mask, batch.labels)
+            else:     y = self.model.decode(batch.ids, batch.mask)
+
         return y
     
     def train(self, config):
@@ -90,7 +96,7 @@ class ExperimentHandler:
         
         predicted_probs, labels = [], []
         for k, batch in enumerate(self.B.batches(dataset), start=1):
-            y = self.model_output(batch)
+            y = self.model_output(batch, train=False)
             loss = self.cross_loss(y, batch.labels)
             pred_prob = F.softmax(y, dim=-1)
             predicted_probs += pred_prob.cpu().tolist()
