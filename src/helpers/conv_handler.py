@@ -9,7 +9,7 @@ import re
 from src.utils import load_json
 
 class ConvHandler:
-    def __init__(self, data_src, system=None, punct=True, action=True, debug=False, class_reduct=False):
+    def __init__(self, data_src, system='bert', punct=True, action=True, debug=False, class_reduct=False):
         self.set_up_paths(data_src, class_reduct)
         
         train, dev, test = self.get_act_data()
@@ -65,12 +65,13 @@ class Conversation:
                     turn['ids'] = [Utterance.tokenizer.cls_token_id] \
                                 + turn['ids'] + [Utterance.tokenizer.sep_token_id]
                     turns.append(SimpleNamespace(**turn)) 
-                turn = {'text':'', 'ids':[], 'segs':[], 'acts':[], 'spkr':None}
+                turn = {'text':'', 'ids':[], 'segs':[], 'acts':[], 'spkr':utt.spkr}
                     
             turn['text'] += ' ' + utt.text
             turn['ids'] += utt.ids[1:-1]
             turn['acts'].append(utt.act)
             turn['segs'].append(len(turn['ids'])+1)
+            
             prev_speaker = utt.spkr
             
         if len(turn['ids'])>0:

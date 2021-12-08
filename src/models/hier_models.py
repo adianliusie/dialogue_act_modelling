@@ -6,11 +6,10 @@ from types import SimpleNamespace #TEMP
 from .model_utils import Attention, get_transformer 
 
 class HierModel(nn.Module):
-    def __init__(self, system, class_num, decoder='baseline', layers=1):  
+    def __init__(self, system, class_num, context='baseline', layers=1):  
         super().__init__()
         self.utt_encoder = get_transformer(system)
-        self.conv_encoder = Decoder(system=decoder, layers=layers)
-        
+        self.conv_encoder = ContextModel(system=context, layers=layers)
         self.pooling = self.get_pooling()           #self.get_pooling(pooling)
         self.classifier = nn.Linear(768, class_num)
         
@@ -24,12 +23,56 @@ class HierModel(nn.Module):
     
     def forward(self, x, mask):
         H1 = self.utt_encoder(x, mask).last_hidden_state #encoder
-        h = self.pooling(H1, mask).unsqueeze(0)
-        h2 = self.conv_encoder(h)
-        y = self.classifier(h2).squeeze(0)
+        H1 = self.pooling(H1, mask).unsqueeze(0)
+        H2 = self.conv_encoder(H1)
+        y = self.classifier(H2).squeeze(0)
         return y
 
-class Decoder(nn.Module):
+class AutoRegressiveModel(nn.Module):
+    def __init__(self, system, class_num, context='baseline', layers=1):  
+        super().__init__()
+        self.class_num = class_num
+        self.utt_encoder = get_transformer(system)
+        self.embedding = nn.Embedding(class_num, 4)
+        self.conv_encoder = ContextModel(system=context, layers=layers)
+        self.decoder = nn.LSTM(input_size=772, hidden_size=772, num_layers=1, bias=True, 
+                               batch_first=True, dropout=0, bidirectional=False)
+        self.pooling = lambda ids, mask: ids[:,0]
+        self.classifier = nn.Linear(772, class_num)
+
+    def forward(self, ids, mask, y):
+        H1 = self.utt_encoder(ids, mask).last_hidden_state #encoder
+        H1 = self.pooling(H1, mask).unsqueeze(0)
+
+        y_inp = torch.roll(y, shifts=1, dims=0)
+        y_embed = self.embedding(y_inp).unsqueeze(0)
+        y_embed[0, 0, :] = 0
+        
+        H2 = self.conv_encoder(H1)
+        H2 = torch.cat((H2, y_embed), -1)
+        H3 = self.decoder(H2)[0]
+        y = self.classifier(H3).squeeze(0)
+        return y
+
+    def decode(self, ids, mask):
+        H1 = self.utt_encoder(ids, mask).last_hidden_state #encoder
+        H1 = self.pooling(H1, mask).unsqueeze(0)
+        H2 = self.conv_encoder(H1).squeeze(0)
+
+        y_embed = torch.zeros(4, device=H2.device)
+        hn = cn = torch.zeros(1, 1, 772, device=H2.device)
+        output = torch.zeros([len(H2), self.class_num], device=H2.device)
+
+        for k, h_k in enumerate(H2):
+            x_k = torch.cat((h_k, y_embed), -1).unsqueeze(0).unsqueeze(0)
+            h_out, (hn,cn) = self.decoder(x_k, (hn,cn))
+            y = self.classifier(h_out.squeeze(0))
+            pred = torch.argmax(y, dim=-1).squeeze(0)
+            y_embed = self.embedding(pred)
+            output[k,:] = y.clone()
+        return output
+
+class ContextModel(nn.Module):
     def __init__(self, system, layers):
         super().__init__()
         print(system)
@@ -71,42 +114,3 @@ class Decoder(nn.Module):
 
         self.model = nn.MultiheadAttention(embed_dim=768, num_heads=1)
         self.forward = lambda x: self.model(x, x, x, attn_mask=context_mask(x))[0]
-
-class AutoRegressive(nn.Module):
-    def __init__(self, system, class_num):  
-        super().__init__()
-        self.class_num = class_num
-        self.utt_encoder = get_transformer(system)
-        self.embedding = nn.Embedding(class_num, 4)
-        self.decoder = nn.LSTM(input_size=772, hidden_size=772, num_layers=1, bias=True, 
-                               batch_first=True, dropout=0, bidirectional=False)
-        self.pooling = lambda ids, mask: ids[:,0]
-        self.classifier = nn.Linear(772, class_num)
-
-    def forward(self, ids, mask, y):
-        H1 = self.utt_encoder(ids, mask).last_hidden_state #encoder
-        h = self.pooling(H1, mask).unsqueeze(0)
-        y_inp = torch.roll(y, shifts=1, dims=0).unsqueeze(0)
-        y_embed = self.embedding(y_inp)
-        y_embed[0, 0, :] = 0
-        h2 = torch.cat((h, y_embed), -1)
-        h3 = self.decoder(h2)[0]
-        y = self.classifier(h3).squeeze(0)
-        return y
-
-    def decode(self, ids, mask):
-        H1 = self.utt_encoder(ids, mask).last_hidden_state #encoder
-        H = self.pooling(H1, mask)
-        
-        y_embed = torch.zeros(4, device=H.device)
-        hn = cn = torch.zeros(1, 1, 772, device=H.device)
-        output = torch.zeros([len(H), self.class_num], device=H.device)
-        for k, h in enumerate(H):
-            inp = torch.cat((h, y_embed), -1).unsqueeze(0).unsqueeze(0)
-            h_out, (hn,cn) = self.decoder(inp, (hn,cn))
-            y = self.classifier(h_out.squeeze(0))
-            pred = torch.argmax(y, dim=-1).squeeze(0)
-            pred[pred != -100] = 1
-            y_embed = self.embedding(pred)
-            output[k,:] = y.clone()
-        return output

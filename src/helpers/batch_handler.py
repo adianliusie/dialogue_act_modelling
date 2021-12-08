@@ -4,36 +4,38 @@ from types import SimpleNamespace
 import numpy as np
 
 class BatchHandler:
-    def __init__(self, mode, mode_args, max_len=None):
+    def __init__(self, mode, mode_args, max_len_conv=None, max_len_utt=None):
         self.device = torch.device('cpu')
         self.mode = mode
-        self.prepare_fn = prep_fn(mode, mode_args)
-        self.max_len = max_len
-    
+        self.past, self.fut = mode_args
+        self.max_c = max_len_conv
+        self.max_u = max_len_utt
+
     def batches(self, data, bsz=8):
-        if self.mode in ['independent', 'back_history', 'context']: 
-            output = self.batches_indep(data, bsz)
+        if self.mode in ['independent', 'context']: 
+            output = self.batches_flat(data, bsz)
         if self.mode in ['hier', 'auto_regressive']: 
             output = self.batches_hier(data)
         return output
     
-    def batches_indep(self, data, bsz=8):
-        examples = self.prepare_fn(data)
-        random.shuffle(examples)
-        examples = [conv[:100] for conv in examples] #TEMP
-        batches = [examples[i:i+bsz] for i in range(0,len(examples), bsz)]
+    def batches_flat(self, data, bsz=8):
+        convs = self.prep_conv(data)
+        utts = [utt for conv in convs for utt in conv]
+        random.shuffle(utts)
+        batches = [utts[i:i+bsz] for i in range(0,len(utts), bsz)]
         batches = [self.batchify(batch) for batch in batches] 
-        batches = [batch for batch in batches if len(batch.ids[0]) <= self.max_len]        
+        batches = [batch for batch in batches if len(batch.ids[0]) <= self.max_u]        
         return batches
 
     def batches_hier(self, data):
-        examples = utt_hier_fn(data)
-        random.shuffle(examples)
-        examples = [conv[:self.max_len] for conv in examples]
-        batches  = [self.batchify(conv) for conv in examples]        
-        batches  = [batch for batch in batches if len(batch.ids[0]) <= self.max_len]        
+        convs = self.prep_conv(data)
+        convs = [conv[i:i+self.max_c] for conv in convs for i in range(0,len(conv), self.max_c)]
+        convs = [conv for conv in convs if len(conv) >= min(self.max_c, 50)]
+        random.shuffle(convs)
+        batches  = [self.batchify(conv) for conv in convs]   
+        batches  = [batch for batch in batches if len(batch.ids[0]) <= self.max_u]
         return batches
-    
+
     def batchify(self, batch):
         ids, labels = zip(*batch)    
         max_len = max([len(x) for x in ids])
@@ -49,7 +51,7 @@ class BatchHandler:
         random.shuffle(examples)
         batches = [conv for conv in examples if len(conv[0])<self.max_len]
         batches = [self.batchify_flat(conv) for conv in examples]        
-        
+
     def batchify_flat(self, batch):
         ids, labels, info = batch
         ids = torch.LongTensor(ids).to(self.device)
@@ -66,61 +68,25 @@ class BatchHandler:
                 document.pop(-1)
         return document
 
-def prep_fn(mode, arg):
-    if mode == 'independent' : func = independent_fn
-    if mode == 'back_history': func = back_history(arg)
-    if mode == 'context'     : func = context(*arg)
-    if mode in ['hier', 'auto_regressive']: func = utt_hier_fn
-    return func
-
-def independent_fn(data):
-    output = []
-    for conv in data:
-        for utt in conv:
-            output.append([utt.ids, utt.act])
-    return output
-
-def back_history(context_len=5):
-    def back_history_fn(data):
+    def prep_conv(self, data):
+        #reduces context utterance to max utterance length
+        def utt_join(past, cur, fut):
+            if self.max_u:
+                while len(past + cur + fut) > self.max_u:
+                    if len(past) == 0 or len(fut) == 0: 
+                        past, fut = [], []
+                        break
+                    past, fut = past[1:], fut[:-1]
+            return past + cur + fut
+                
+        if self.mode == 'independent': self.past = self.fut = 0
         output, context = [], []
         for conv in data:
-            for utt in conv:
-                context_ids = [i for u in context for i in u[1:-1]]
-                ids = context_ids + utt.ids 
-                output.append([ids, utt.act])
-                context.append(utt.ids)
-                context = context[-context_len:].copy()
-        return output
-    return back_history_fn
-
-def context(past=3, future=3):
-    def context_fn(data):
-        output, context = [], []
-        for conv in data:
+            conv_out = []
             for i, cur_utt in enumerate(conv.utts):
-                past_utts = [tok for utt in conv.utts[max(i-past, 0):i] for tok in utt.ids[1:-1]]
-                future_utts = [tok for utt in conv.utts[i+1:i+future+1] for tok in utt.ids[1:-1]]
-                ids = past_utts + cur_utt.ids + future_utts
-                output.append([ids, cur_utt.act])
+                past_utts = [tok for utt in conv.utts[max(i-self.past, 0):i] for tok in utt.ids[1:-1]]
+                future_utts = [tok for utt in conv.utts[i+1:i+self.fut+1] for tok in utt.ids[1:-1]]
+                ids = utt_join(past_utts, cur_utt.ids, future_utts)
+                conv_out.append([ids, cur_utt.act])
+            output.append(conv_out)
         return output
-    return context_fn
-
-def utt_hier_fn(data):
-    output = []
-    for conv in data:
-        output.append([[utt.ids, utt.act] for utt in conv.utts])
-    return output
-
-def utt_flat():
-    utt_hier_fn = utt_hier()
-    def utt_flat_fn(data):
-        data = utt_hier_fn(data)
-        output = []
-        for utts, labels in data:
-            CLS, SEP = utts[0][0], utts[0][-1]
-            flat_conv = [CLS] + [tok for utt in utts for tok in utt[1:-1]] + [SEP]
-            span = [len(utt[1:-1]) for utt in utts]
-            span_segments = [1] + list(1 + np.cumsum(span))
-            output.append([flat_conv, labels, span_segments])
-        return output
-    return utt_flat_fn
