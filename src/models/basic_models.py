@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from .model_utils import get_transformer
+from ..utils import get_transformer
 
 class FlatTransModel(nn.Module):
     def __init__(self, system, class_num=1):

@@ -1,84 +1,80 @@
-from transformers import BertTokenizerFast, RobertaTokenizerFast, BigBirdTokenizer, ReformerTokenizerFast, AlbertTokenizerFast
-
 from types import SimpleNamespace
 import json
 from tqdm import tqdm 
 import string
 import re 
 
-from src.utils import load_json
+from src.utils import load_json, get_tokenizer, flatten
 
 class ConvHandler:
-    def __init__(self, data_src, system='bert', punct=True, action=True, debug=False, class_reduct=False):
-        self.set_up_paths(data_src, class_reduct)
-        
-        train, dev, test = self.get_act_data()
-        train, dev, test = [list(i.values()) for i in [train, dev, test]]
-        
-        if debug:  train, dev, test = train[:10], dev[:10], test[:10]
-            
-        Utterance.set_punct(punct)
-        Utterance.set_action(action)
-        Utterance.set_system(system)
-        
-        self.train = [Conversation(conv) for conv in tqdm(train)]
-        self.dev = [Conversation(conv) for conv in dev]
-        self.test = [Conversation(conv) for conv in test]
+    cache = {}
+    def __init__(self, data_src, system='bert', punct=True, action=True, lim=None, class_reduct=False): 
+        #use hashing so that if data processed recently just use the processed version
+        arg_hash = hash((data_src, system, punct, action, class_reduct))
+        if arg_hash in self.cache:
+            self.__dict__ = self.cache[arg_hash]
+        else:
+            Utterance.set_punct(punct)
+            Utterance.set_action(action)
+            Utterance.set_system(system)
+            self.get_data(data_src, lim)   
+            self.__class__.cache[arg_hash] = self.__dict__
 
-    def set_up_paths(self, data_src, class_reduct=False):
-        global BASE_DIR, act_id_dict, act_names_dict
-        if data_src == 'swbd':
-            BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_acts/act_data/swbd_act/data'
-        elif data_src == 'ami':
-            BASE_DIR = '/home/alta/Conversational/OET/al826/2021/dialogue_acts/act_data/ami_act/data'
+    def get_data(self, data_src, lim=None, class_reduct=False):
+        if data_src in ['swbd', 'ami']: self.get_train_sets(data_src, lim, class_reduct)
+        elif data_src == 'oet'        : self.get_oet_data()
         
-        if not class_reduct:
-            act_id_dict = load_json(f'{BASE_DIR}/act_dict.json')
-            act_names_dict = load_json(f'{BASE_DIR}/act_names.json')
-        elif class_reduct:
-            act_id_dict = load_json(f'{BASE_DIR}/act_dict_red.json')
-            act_names_dict = load_json(f'{BASE_DIR}/act_names_red.json')
-
-        self.act_id_dict = act_id_dict
-        self.act_names = act_names_dict
-        self.id_to_act = {ind:act_names_dict[code] for code, ind in act_id_dict.items()}
-        
-    def get_act_data(self):
-        paths = [f'{BASE_DIR}/act_{i}.json' for i in ['train', 'dev', 'test']]
+    def get_train_sets(self, data_src, lim=None, class_reduct=False):
+        base_dir = f'/home/alta/Conversational/OET/al826/2021/data_2/conversations/{data_src}'
+        paths = [f'{base_dir}/{i}.json' for i in ['train', 'dev', 'test']]
         train, dev, test = [load_json(i) for i in paths]
-        return (train, dev, test)
+        self.create_label_dict(f'{base_dir}/labels.json')
+        
+        if lim:  train, dev, test = train[:lim], dev[:lim], test[:lim]
+        self.train = [Conversation(conv['turns']) for conv in tqdm(train)]
+        self.dev   = [Conversation(conv['turns']) for conv in tqdm(dev)] 
+        self.test  = [Conversation(conv['turns']) for conv in tqdm(test)] 
+        
+    def create_label_dict(self, path):
+        global label_dict
+        label_dict = load_json(path)
+        label_dict = {int(k):v for k, v in label_dict.items()}
+        self.label_dict = label_dict
+
+    def get_oet_data(self):
+        base_dir = '/home/alta/Conversational/OET/al826/2021/data_2/conversations/oet'
+        data = load_json(f'{base_dir}/oet_small.json')
+        self.train = [Conversation(conv['turns']) for conv in tqdm(data)]
 
 class Conversation:
-    def __init__(self, data):
+    def __init__(self, data, turns=True):
         self.data = data
-        self.utts = [Utterance(**utt) for utt in self.data]
-        self.turns = self.make_turns()
         
+        if turns:
+            self.utts  = [Utterance(**utt) for utt in self.data]
+            self.turns = self.make_turns()
+        else:
+            self.turns = [Utterance(**utt) for utt in self.data]
+            
     def make_turns(self):
         turns = []
         prev_speaker = None
-        turn = {'text':'', 'ids':[], 'segs':[], 'acts':[], 'spkr':None}
-
+        turn = {'text':'', 'speaker':None, 'tags':{'segs':[], 'labels':[]}}
+        i = 0
         for utt in self.utts:
-            if utt.spkr != prev_speaker:                    
-                if len(turn['text'])>0:
-                    turn['ids'] = [Utterance.tokenizer.cls_token_id] \
-                                + turn['ids'] + [Utterance.tokenizer.sep_token_id]
-                    turns.append(SimpleNamespace(**turn)) 
-                turn = {'text':'', 'ids':[], 'segs':[], 'acts':[], 'spkr':utt.spkr}
-                    
+            if utt.speaker != prev_speaker:                    
+                if len(turn['text'])>0:                        
+                    turns.append(Utterance(**turn)) 
+                turn = {'text':'', 'speaker':utt.speaker, 'tags':{'segs':[], 'labels':[], 'ids':[]}}
+                
             turn['text'] += ' ' + utt.text
-            turn['ids'] += utt.ids[1:-1]
-            turn['acts'].append(utt.act)
-            turn['segs'].append(len(turn['ids'])+1)
+            turn['tags']['labels'].append(utt.label)
+            turn['tags']['ids'].append(utt.ids[1:-1])
+            turn['tags']['segs'].append(len(flatten(turn['tags']['ids']))+1)
+            prev_speaker = utt.speaker
             
-            prev_speaker = utt.spkr
-            
-        if len(turn['ids'])>0:
-            turn['ids'] = [Utterance.tokenizer.cls_token_id] + turn['ids'] \
-                        + [Utterance.tokenizer.sep_token_id]
         if len(turn['text'])>0:
-            turns.append(SimpleNamespace(**turn)) 
+            turns.append(Utterance(**turn)) 
         return turns
     
     def __iter__(self):
@@ -88,29 +84,28 @@ class Conversation:
         return self.utts[k]
 
 class Utterance:
-    tokenizer, punct, action = None, True, True
+    punct, action, tokenizer = True, True, get_tokenizer('bert')
 
-    def __init__(self, text, spkr, act=None):
+    def __init__(self, text, speaker=None, label=None, tags=None):
         self.text = text
+        self.speaker = speaker
+        self.label = label
+        self.tags = tags
+        self.ids = self.tokenizer(self.text).input_ids
+
+        self.clean_text()
+                    
+        if label != None:
+            self.label_name = label_dict[label]
+            
+    def clean_text(self):
         if not self.action:
             self.text = re.sub("<<.*?>>", "", self.text)
             self.text = re.sub("<.*?>", "", self.text)
-
         if not self.punct: 
             self.text = re.sub(r'[^\w\s]', '', self.text)
-
         self.text = self.text.strip()
-        self.spkr = spkr
         
-        if self.tokenizer != None:
-            self.ids = self.tokenizer(self.text).input_ids
-        else:
-            self.ids = [None]
-            
-        if act != None:
-            self.act = act_id_dict[act]
-            self.act_str = act_names_dict[act] if act in act_names_dict else None
-            
     @classmethod
     def set_punct(cls, value):
         cls.punct = value
@@ -121,16 +116,7 @@ class Utterance:
     
     @classmethod
     def set_system(cls, system):
-        if system in ['bert', 'electra', 'rand']: 
-            cls.tokenizer = BertTokenizerFast.from_pretrained("bert-base-uncased")
-        if system == 'bert_cased':
-            cls.tokenizer = BertTokenizerFast.from_pretrained('bert-base-cased')
-        elif system == 'roberta': 
-            cls.tokenizer = RobertaTokenizerFast.from_pretrained("roberta-base")
-        elif system == 'big_bird': 
-            cls.tokenizer = BigBirdTokenizer.from_pretrained('google/bigbird-roberta-base')
-        elif system == 'albert':
-            cls.tokenizer = AlbertTokenizerFast.from_pretrained('albert-base-v2')
-            
+            cls.tokenizer = get_tokenizer(system)
+
     def __repr__(self):
         return self.text

@@ -3,7 +3,8 @@ import torch.nn as nn
 from transformers import BertConfig, BertModel, RobertaModel, ElectraModel
 from types import SimpleNamespace #TEMP
 
-from .model_utils import Attention, get_transformer 
+from .model_utils import Attention 
+from ..utils import get_transformer
 
 class HierModel(nn.Module):
     def __init__(self, system, class_num, context='baseline', layers=1):  

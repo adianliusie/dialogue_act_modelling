@@ -11,27 +11,29 @@ class ExperimentHandler:
     def __init__(self, system_cfg):
         self.L = Logger(system_cfg)
         if system_cfg.load: system_cfg = self.L.system_cfg
-        self.D = ConvHandler(system_cfg.data_src, system_cfg.system, system_cfg.punct, system_cfg.action, system_cfg.debug, 
-                             system_cfg.class_reduct)
+            
+        self.mode = system_cfg.mode
+        self.system = system_cfg.system
+        
+        self.act_model = self.create_act_model(system_cfg, 43)
+        self.seg_model = FlatSegModel(self.system)
         self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len_conv, system_cfg.max_len_utts)
 
-        self.mode = system_cfg.mode
-        num_classes = max(self.D.act_id_dict.values())+1
-        if self.mode in ['independent', 'context']: self.model = FlatTransModel(system_cfg.system, num_classes)
-        elif self.mode == 'hier': self.model = HierModel(system_cfg.system, num_classes, system_cfg.hier_model, system_cfg.layers)
-        elif self.mode == 'auto_regressive':
-            self.model = AutoRegressiveModel(system_cfg.system, num_classes, system_cfg.hier_model, system_cfg.layers)
-        elif self.mode == 'full_context': self.model = SpanModel(system_cfg.system, num_classes)
-            
-        self.device = torch.device(system_cfg.device) if torch.cuda.is_available() \
-                      else torch.device('cpu')
-        
-        self.S = SegmentHandler()
-        self.seg_model = FlatSegModel(self.L.system_cfg.system)
+        self.device = torch.device(system_cfg.device) if torch.cuda.is_available() else torch.device('cpu')
 
         self.cross_loss = torch.nn.CrossEntropyLoss()
         self.BCE_loss = torch.nn.BCELoss(reduction='none')
         
+    def create_act_model(self, config, num_classes):
+        if config.mode in ['independent', 'context']: 
+            self.model = FlatTransModel(config.system, num_classes)
+        elif self.mode == 'hier': 
+            self.model = HierModel(config.system, num_classes, config.hier_model, config.layers)
+        elif self.mode == 'auto_regressive':
+            self.model = AutoRegressiveModel(config.system, num_classes, config.hier_model, config.layers)
+        elif self.mode == 'full_context': 
+            self.model = SpanModel(config.system, num_classes)
+           
     def model_output(self, batch, train=True):
         if self.mode in ['independent', 'context', 'hier']: 
             y = self.model(batch.ids, batch.mask)
@@ -42,10 +44,12 @@ class ExperimentHandler:
             else:     y = self.model.decode(batch.ids, batch.mask)
         return y
     
-    def train(self, config):
-        self.to(self.device)
+    ####################  Methods For Dialogue Act Classification  ####################
+    def train_act(self, config):
+        data_set = self.select_data(config, 'train')
         self.L.save_config('train_cfg', config)
-        
+        self.to(self.device)
+
         optimizer = torch.optim.Adam(self.model.parameters(), lr=config.lr)
         if config.scheduling:
               SGD_steps = (len(train_data)*self.epochs)/config.bsz
@@ -56,7 +60,7 @@ class ExperimentHandler:
         for epoch in range(config.epochs):
             logger = np.zeros(3)
 
-            for k, batch in enumerate(self.B.batches(self.D.train, config.bsz), start=1):
+            for k, batch in enumerate(self.B.act_batches(data_set, config.bsz), start=1):
                 y = self.model_output(batch)
                 loss = self.cross_loss(y, batch.labels)
 
@@ -66,7 +70,6 @@ class ExperimentHandler:
                 if config.scheduling: scheduler.step()
                 
                 y_pred = torch.argmax(y, -1)
-
                 logger[0] += loss.item()
                 logger[1] += sum(y_pred == batch.labels)
                 logger[2] += len(batch.labels)
@@ -75,7 +78,7 @@ class ExperimentHandler:
                     self.L.log(f'{k:<5}  {logger[0]/config.print_len:.3f}    {logger[1]/logger[2]:.3f}')
                     logger = np.zeros(3)
                 
-            preds, labels = self.evaluate(mode='dev')
+            preds, labels = self.eval_act(config, mode='dev')
             decision = np.argmax(preds, axis=-1)
             acc = sum(decision==labels)/len(decision)
             
@@ -87,12 +90,12 @@ class ExperimentHandler:
         self.load_model('best_epoch')
     
     @no_grad
-    def evaluate(self, mode='dev'):
+    def eval_act(self, config, mode='test'):
+        data_set = self.select_data(config, mode)
         self.to(self.device)
-        if   mode ==  'dev': dataset = self.D.dev 
-        elif mode == 'test': dataset = self.D.test
+        
         predicted_probs, labels = [], []
-        for k, batch in enumerate(self.B.batches(dataset), start=1):
+        for k, batch in enumerate(self.B.act_batches(data_set), start=1):
             y = self.model_output(batch, train=False)
             loss = self.cross_loss(y, batch.labels)
             pred_prob = F.softmax(y, dim=-1)
@@ -100,12 +103,15 @@ class ExperimentHandler:
             labels += batch.labels.cpu().tolist()
         return(predicted_probs, labels)
 
-    def train_seg(self, config=None):
+    ####################  Methods For Act Level Segmentation  ####################
+    def train_seg(self, config):
+        data_set = self.select_data(config, 'train')
+
         self.to(self.device)
         optimizer = torch.optim.Adam(self.seg_model.parameters(), lr=1e-5)
 
         logger = np.zeros(6)
-        for k, batch in enumerate(self.S.batches(self.D.train), start=1):
+        for k, batch in enumerate(self.B.seg_batches(data_set), start=1):
             y = self.seg_model(batch.ids, batch.mask)
             loss = torch.mean(self.BCE_loss(y, batch.labels)[batch.mask==1])
             
@@ -127,11 +133,11 @@ class ExperimentHandler:
                 logger = np.zeros(6)
 
     @no_grad
-    def eval_seg(self):
+    def eval_seg(self, config, mode='test'):
+        data_set = self.select_data(config, mode)
         self.to(self.device)
-        if   mode ==  'dev': dataset = self.D.dev 
-        elif mode == 'test': dataset = self.D.test        
-        for k, batch in enumerate(self.S.batches(dataset), start=1):
+    
+        for k, batch in enumerate(self.S.batches(data_set), start=1):
             y = seg_model(batch.ids, batch.mask)
             loss = torch.mean(self.BCE_loss(y, batch.labels)[batch.mask==1])
             
@@ -139,15 +145,27 @@ class ExperimentHandler:
                 self.L.log(f'{k:<5}  acc:{logger[0]/logger[1]:.3f}   p:{logger[2]/logger[3]:.3f}   r:{logger[2]/logger[4]:.3f}')
                 logger = np.zeros(5)
 
+    ########  Methods For Cascade Segmentation and Act Classification ########
     @no_grad
-    def classify_turns(self, mode='dev'):
-        if   mode ==  'dev': dataset = self.D.dev 
-        elif mode == 'test': dataset = self.D.test
-            
-        ids, align, acts = self.segment_convs(dataset)
+    def pred_conv_act(self, config, mode='test'):
+        seg_ids, _align, _segs = self.eval_conv_seg(config, mode)
+        
+        output = []
+        for conv in self.B.cascade_act(seg_ids, _align, _segs):
+            conv_act_pred = []
+            for batch in conv:
+                y = self.model(batch.ids, batch.mask)
+                pred = torch.argmax(y, dim=-1)
+                conv_act_pred += pred.cpu().tolist()
+            output.append(conv_act_pred)
+        return seg_ids, output
+    
+    @no_grad
+    def eval_conv_act(self, config, mode='test'):
+        ids, align, acts = self.eval_conv_seg(config, mode)
         
         predicted_probs, labels = [], []
-        for conv in self.S.batches_seg(ids, align, acts):
+        for conv in self.B.cascade_act(ids, align, acts):
             for batch in conv:
                 y = self.model(batch.ids, batch.mask)
                 pred_prob = F.softmax(y, dim=-1)
@@ -156,13 +174,14 @@ class ExperimentHandler:
         return predicted_probs, labels
     
     @no_grad
-    def segment_convs(self, data):
+    def eval_conv_seg(self, config, mode='test'):  
+        data_set = self.select_data(config, mode)
         pairs = lambda x: [(x[i], x[i+1]) for i in range(len(x)-1)]
-        batch_pair = lambda x: [pairs(i) for i in x]
+        batch_pair = lambda x: [pairs(seg_change) for seg_change in x]
         
         out_ids, out_align, out_acts, utt_count = [], [], [], 0
-        for conv_num, conv in enumerate(self.S.seg_conv(self.D.dev), start=1):
-            utt_ids, utt_align, utt_acts = [], [], []
+        for conv_num, conv in enumerate(self.B.cascade_seg(data_set), start=1):
+            conv_ids, conv_align, conv_acts = [], [], []
             for batch in conv:
                 y = self.seg_model(batch.ids, batch.mask)
 
@@ -171,27 +190,40 @@ class ExperimentHandler:
                 for i, j in (y>0.5).nonzero(as_tuple=False):
                     if j < batch.mask[i].sum():
                         decisions[i].append(int(j))
-
-                decisions = batch_pair(decisions)
-                seg_labels = batch_pair(batch.segs)
-                utt_count += sum([1 for turn in seg_labels for utt in turn])
+                seg_pred = batch_pair(decisions)
                 
-                # split turns into utterances
                 for k, turn in enumerate(batch.ids):
-                    for start, end in decisions[k]:
+                    for start, end in seg_pred[k]:
                         segment = turn[start:end]
-                        utt_ids.append(segment.tolist())
-                        utt_align.append((start, end) in seg_labels[k])
-                        if utt_align[-1]: utt_acts.append(batch.act_dict[k][end])
-                        else:             utt_acts.append(-1)
-                            
-            out_ids.append(utt_ids), out_align.append(utt_align), out_acts.append(utt_acts)
+                        conv_ids.append([101] + segment.tolist() + [102])
+                
+                #Evaluate if labels are available
+                if batch.segs:  
+                    seg_labels = batch_pair(batch.segs)
+                    for k, turn in enumerate(batch.ids):
+                        for start, end in seg_pred[k]:
+                            conv_align.append((start, end) in seg_labels[k])
+                            if conv_align[-1]: conv_acts.append(batch.act_dict[k][end])
+                            else:              conv_acts.append(-1)
+                    utt_count += sum([1 for turn in seg_labels for utt in turn])
 
-        hits = sum([sum(x) for x in out_align])
-        preds = sum([len(x) for x in out_align])
-        self.L.log(f'SEG  P:{hits/preds:.3f}   R:{hits/utt_count:.3f}')
+            out_ids.append(conv_ids), out_align.append(conv_align), out_acts.append(conv_acts)
+
+        if batch.segs:
+            hits = sum([sum(x) for x in out_align])
+            preds = sum([len(x) for x in out_align])
+            self.L.log(f'SEG  P:{hits/preds:.3f}   R:{hits/utt_count:.3f}')
+            
         return out_ids, out_align, out_acts
-    
+
+    #############    GENERAL UTILITIES     #############
+    def select_data(self, config, mode):
+        D = ConvHandler(config.data_src, self.system, config.punct, config.action, config.lim, config.class_reduct)
+        if   mode == 'train': data_set = D.train 
+        elif mode ==   'dev': data_set = D.dev 
+        elif mode ==  'test': data_set = D.test
+        return data_set
+
     def save_model(self, name):
         device = next(self.model.parameters()).device
         self.model.to("cpu")
@@ -203,6 +235,6 @@ class ExperimentHandler:
 
     def to(self, device):
         self.model.to(device)
-        self.B.to(device)
         self.seg_model.to(device)
-        self.S.to(device)
+        self.B.to(device)
+    

@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 import math
 
-from .basic_models import get_transformer
+from ..utils import get_transformer
 
 class SpanModel(nn.Module): 
     def __init__(self, system, num_classes):
