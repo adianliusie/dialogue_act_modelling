@@ -3,6 +3,8 @@ import random
 from types import SimpleNamespace
 import numpy as np
 
+from ..utils import flatten
+
 class BatchHandler:
     def __init__(self, mode, mode_args, conv_len=None, utt_len=None):
         self.mode = mode
@@ -64,13 +66,16 @@ class BatchHandler:
                 conv_out.append([ids, cur_utt.label])
             output.append(conv_out)
         return output
-   
+
     def utt_join(self, past, cur, fut):
         if self.max_u and max(len(past), len(fut)) != 0:
+            k = 0
             while len(flatten(past)+cur+flatten(fut)) > self.max_u and len(past)>0:
-                past, fut = past[1:], fut[:-1]
+                if k%2 == 0: past = past[1:]
+                else:        fut  = fut[:-1]
+                k += 1
         return flatten(past) + cur + flatten(fut)
-    
+        
     ################     Segmentation Methods    ################
     def batchify_seg(self, batch):
         ids, segs, acts = zip(*batch)   
@@ -111,11 +116,30 @@ class BatchHandler:
             yield batches
     
     def cascade_act(self, ids, align, labels, bsz=8):
+        ids = self.conv_prep_casc(ids)
         for conv_ids, conv_align, conv_labels in zip(ids, align, labels):
             utts = list(zip(conv_ids, conv_align, conv_labels))
             batches = [utts[i:i+bsz] for i in range(0,len(utts), bsz)]
             batches = [self.batchify_casc(batch) for batch in batches]
             yield batches
+    
+    def conv_prep_casc(self, data):    
+        if self.mode == 'independent': self.past = self.fut = 0
+        output, context = [], []
+        for conv in data:
+            conv_out = []
+            for i, cur_utt in enumerate(conv):
+                past_utts = [utt[1:-1] for utt in conv[max(i-self.past, 0):i]]
+                future_utts = [utt[1:-1] for utt in conv[i+1:i+self.fut+1]]
+                ids = self.utt_join(past_utts, cur_utt, future_utts)
+                conv_out.append(ids)
+            output.append(conv_out)
+        return output
+    
+    def structure_ids(self, convs):
+        convs = [[SimpleNamespace(ids=utt_ids) for utt_ids in conv] for conv in convs]
+        convs = [SimpleNamespace(utts=conv) for conv in convs]
+        return convs
     
     def batchify_casc(self, batch):
         ids, align, labels = zip(*batch)  
@@ -134,7 +158,3 @@ class BatchHandler:
         ids = torch.LongTensor(padded_ids).to(self.device)
         mask = torch.FloatTensor(mask).to(self.device)
         return ids, mask
-    
-def flatten(conv): 
-    return [tok for utt in conv for tok in utt]
-    

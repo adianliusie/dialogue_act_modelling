@@ -9,14 +9,16 @@ from src.utils import load_json, get_tokenizer, flatten
 class ConvHandler:
     cache = {}
     def __init__(self, data_src, system='bert', punct=True, action=True, lim=None, class_reduct=False): 
-        #use hashing so that if data processed recently just use the processed version
+        self.tokenizer = get_tokenizer(system)
+        Utterance.set_punct(punct)
+        Utterance.set_action(action)
+        Utterance.set_system(system)
+        
+        #use hashing so that if data processed recently, use the processed version
         arg_hash = hash((data_src, system, punct, action, class_reduct))
         if arg_hash in self.cache:
             self.__dict__ = self.cache[arg_hash]
         else:
-            Utterance.set_punct(punct)
-            Utterance.set_action(action)
-            Utterance.set_system(system)
             self.get_data(data_src, lim)   
             self.__class__.cache[arg_hash] = self.__dict__
 
@@ -47,15 +49,12 @@ class ConvHandler:
         self.train = [Conversation(conv['turns']) for conv in tqdm(data)]
 
 class Conversation:
-    def __init__(self, data, turns=True):
+    def __init__(self, data):
         self.data = data
         
-        if turns:
-            self.utts  = [Utterance(**utt) for utt in self.data]
-            self.turns = self.make_turns()
-        else:
-            self.turns = [Utterance(**utt) for utt in self.data]
-            
+        self.utts  = [Utterance(**utt) for utt in self.data]
+        self.turns = self.make_turns()
+ 
     def make_turns(self):
         turns = []
         prev_speaker = None
@@ -63,8 +62,11 @@ class Conversation:
         i = 0
         for utt in self.utts:
             if utt.speaker != prev_speaker:                    
-                if len(turn['text'])>0:                        
-                    turns.append(Utterance(**turn)) 
+                if len(turn['text'])>0:             
+                    turn_obj = Utterance(**turn)
+                    turns.append(turn_obj) 
+                    assert turn_obj.ids[1:-1] == flatten(turn['tags']['ids'])
+
                 turn = {'text':'', 'speaker':utt.speaker, 'tags':{'segs':[], 'labels':[], 'ids':[]}}
                 
             turn['text'] += ' ' + utt.text
@@ -88,12 +90,12 @@ class Utterance:
 
     def __init__(self, text, speaker=None, label=None, tags=None):
         self.text = text
+        self.clean_text()
         self.speaker = speaker
         self.label = label
         self.tags = tags
         self.ids = self.tokenizer(self.text).input_ids
 
-        self.clean_text()
                     
         if label != None:
             self.label_name = label_dict[label]

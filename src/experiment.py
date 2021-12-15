@@ -3,20 +3,23 @@ import torch.nn.functional as F
 import numpy as np
 from sklearn.metrics import precision_recall_curve
 
-from .helpers import ConvHandler, BatchHandler, SegmentHandler, Logger
+from .helpers import ConvHandler, BatchHandler, Logger
 from .models import FlatTransModel, SpanModel, HierModel, AutoRegressiveModel, FlatSegModel
 from .utils import no_grad, toggle_grad, LossFunctions
 
 class ExperimentHandler:
     def __init__(self, system_cfg):
+        load = system_cfg.load
+
         self.L = Logger(system_cfg)
-        if system_cfg.load: system_cfg = self.L.system_cfg
-            
+        if load: system_cfg = self.L.system_cfg
+
         self.mode = system_cfg.mode
         self.system = system_cfg.system
         
         self.act_model = self.create_act_model(system_cfg, 43)
         self.seg_model = FlatSegModel(self.system)
+        if load: self.load_models()
         self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len_conv, system_cfg.max_len_utts)
 
         self.device = torch.device(system_cfg.device) if torch.cuda.is_available() else torch.device('cpu')
@@ -26,31 +29,34 @@ class ExperimentHandler:
         
     def create_act_model(self, config, num_classes):
         if config.mode in ['independent', 'context']: 
-            self.model = FlatTransModel(config.system, num_classes)
+            model = FlatTransModel(config.system, num_classes)
         elif self.mode == 'hier': 
-            self.model = HierModel(config.system, num_classes, config.hier_model, config.layers)
+            model = HierModel(config.system, num_classes, config.hier_model, config.layers)
         elif self.mode == 'auto_regressive':
-            self.model = AutoRegressiveModel(config.system, num_classes, config.hier_model, config.layers)
+            model = AutoRegressiveModel(config.system, num_classes, config.hier_model, config.layers)
         elif self.mode == 'full_context': 
-            self.model = SpanModel(config.system, num_classes)
-           
+            model = SpanModel(config.system, num_classes)
+        return model 
+    
     def model_output(self, batch, train=True):
         if self.mode in ['independent', 'context', 'hier']: 
-            y = self.model(batch.ids, batch.mask)
+            y = self.act_model(batch.ids, batch.mask)
         elif self.mode in ['full_context']: 
-            y = self.model(batch.ids, batch.info)
+            y = self.act_model(batch.ids, batch.info)
         elif self.mode in ['auto_regressive']: 
-            if train: y = self.model(batch.ids, batch.mask, batch.labels)
-            else:     y = self.model.decode(batch.ids, batch.mask)
+            if train: y = self.act_model(batch.ids, batch.mask, batch.labels)
+            else:     y = self.act_model.decode(batch.ids, batch.mask)
         return y
     
     ####################  Methods For Dialogue Act Classification  ####################
     def train_act(self, config):
+        self.L.save_config('act_train_cfg', config)
+
         data_set = self.select_data(config, 'train')
-        self.L.save_config('train_cfg', config)
+        self.save_act_info(config)
         self.to(self.device)
 
-        optimizer = torch.optim.Adam(self.model.parameters(), lr=config.lr)
+        optimizer = torch.optim.Adam(self.act_model.parameters(), lr=config.lr)
         if config.scheduling:
               SGD_steps = (len(train_data)*self.epochs)/config.bsz
               lambda1 = lambda i: 10*i/SGD_steps if i <= SGD_steps/10 else 1 - ((i - 0.1*SGD_steps)/(0.9*SGD_steps))
@@ -83,11 +89,11 @@ class ExperimentHandler:
             acc = sum(decision==labels)/len(decision)
             
             if acc > best_metric:
-                self.save_model('best_epoch')
+                self.save_act_model('best_epoch')
                 best_metric = acc
             self.L.log(acc)
             
-        self.load_model('best_epoch')
+        self.load_act_model('best_epoch')
     
     @no_grad
     def eval_act(self, config, mode='test'):
@@ -105,8 +111,8 @@ class ExperimentHandler:
 
     ####################  Methods For Act Level Segmentation  ####################
     def train_seg(self, config):
+        self.L.save_config('seg_train_cfg', config)
         data_set = self.select_data(config, 'train')
-
         self.to(self.device)
         optimizer = torch.optim.Adam(self.seg_model.parameters(), lr=1e-5)
 
@@ -147,27 +153,28 @@ class ExperimentHandler:
 
     ########  Methods For Cascade Segmentation and Act Classification ########
     @no_grad
-    def pred_conv_act(self, config, mode='test'):
-        seg_ids, _align, _segs = self.eval_conv_seg(config, mode)
+    def pred_conv_act(self, config, mode='train'):
+        seg_ids, _align, _segs, turn_len = self.eval_conv_seg(config, mode)
         
         output = []
         for conv in self.B.cascade_act(seg_ids, _align, _segs):
             conv_act_pred = []
             for batch in conv:
-                y = self.model(batch.ids, batch.mask)
+                y = self.act_model(batch.ids, batch.mask)
                 pred = torch.argmax(y, dim=-1)
                 conv_act_pred += pred.cpu().tolist()
             output.append(conv_act_pred)
-        return seg_ids, output
+        
+        return seg_ids, output, turn_len
     
     @no_grad
     def eval_conv_act(self, config, mode='test'):
-        ids, align, acts = self.eval_conv_seg(config, mode)
+        ids, align, acts, _ = self.eval_conv_seg(config, mode)
         
         predicted_probs, labels = [], []
         for conv in self.B.cascade_act(ids, align, acts):
             for batch in conv:
-                y = self.model(batch.ids, batch.mask)
+                y = self.act_model(batch.ids, batch.mask)
                 pred_prob = F.softmax(y, dim=-1)
                 predicted_probs += pred_prob.cpu().tolist()
                 labels += batch.labels
@@ -179,9 +186,9 @@ class ExperimentHandler:
         pairs = lambda x: [(x[i], x[i+1]) for i in range(len(x)-1)]
         batch_pair = lambda x: [pairs(seg_change) for seg_change in x]
         
-        out_ids, out_align, out_acts, utt_count = [], [], [], 0
+        ids, align, acts, turn_len, utt_count,  = [], [], [], [], 0
         for conv_num, conv in enumerate(self.B.cascade_seg(data_set), start=1):
-            conv_ids, conv_align, conv_acts = [], [], []
+            conv_ids, conv_align, conv_acts, conv_turn_len = [], [], [], []
             for batch in conv:
                 y = self.seg_model(batch.ids, batch.mask)
 
@@ -196,7 +203,8 @@ class ExperimentHandler:
                     for start, end in seg_pred[k]:
                         segment = turn[start:end]
                         conv_ids.append([101] + segment.tolist() + [102])
-                
+                    conv_turn_len.append(len(seg_pred[k]))
+                    
                 #Evaluate if labels are available
                 if batch.segs:  
                     seg_labels = batch_pair(batch.segs)
@@ -207,14 +215,14 @@ class ExperimentHandler:
                             else:              conv_acts.append(-1)
                     utt_count += sum([1 for turn in seg_labels for utt in turn])
 
-            out_ids.append(conv_ids), out_align.append(conv_align), out_acts.append(conv_acts)
+            ids.append(conv_ids), align.append(conv_align), acts.append(conv_acts), turn_len.append(conv_turn_len)
 
         if batch.segs:
-            hits = sum([sum(x) for x in out_align])
-            preds = sum([len(x) for x in out_align])
+            hits = sum([sum(x) for x in align])
+            preds = sum([len(x) for x in align])
             self.L.log(f'SEG  P:{hits/preds:.3f}   R:{hits/utt_count:.3f}')
             
-        return out_ids, out_align, out_acts
+        return ids, align, acts, turn_len
 
     #############    GENERAL UTILITIES     #############
     def select_data(self, config, mode):
@@ -224,17 +232,38 @@ class ExperimentHandler:
         elif mode ==  'test': data_set = D.test
         return data_set
 
-    def save_model(self, name):
-        device = next(self.model.parameters()).device
-        self.model.to("cpu")
-        torch.save(self.model.state_dict(), f'{self.L.path}/models/{name}.pt')
-        self.model.to(device)
+    def save_act_info(self, config):
+        D = ConvHandler(config.data_src, self.system, config.punct, config.action, config.lim, config.class_reduct)
 
-    def load_model(self, name):
-        self.model.load_state_dict(torch.load(self.L.path + f'/models/{name}.pt'))
+        self.tokenizer = D.tokenizer
+        self.label_dict = D.label_dict
+        
+    def save_models(self, name='base'):
+        self.save_act_model(name)
+        self.save_seg_model(name)
+
+    def save_act_model(self, name='base'):
+        device = next(self.act_model.parameters()).device
+        self.act_model.to("cpu")
+        torch.save(self.act_model.state_dict(), f'{self.L.path}/models/{name}_act.pt')
+
+    def save_seg_model(self, name='base'):
+        device = next(self.seg_model.parameters()).device
+        self.seg_model.to("cpu")
+        torch.save(self.seg_model.state_dict(), f'{self.L.path}/models/{name}_seg.pt')
+    
+    def load_models(self, name='base'):
+        self.load_act_model(name)
+        self.load_seg_model(name)
+
+    def load_act_model(self, name='base'):
+        self.act_model.load_state_dict(torch.load(self.L.path + f'/models/{name}_act.pt'))
+        
+    def load_seg_model(self, name='base'):
+        self.seg_model.load_state_dict(torch.load(self.L.path + f'/models/{name}_seg.pt'))
 
     def to(self, device):
-        self.model.to(device)
+        self.act_model.to(device)
         self.seg_model.to(device)
         self.B.to(device)
     
