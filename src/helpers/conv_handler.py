@@ -15,11 +15,11 @@ class ConvHandler:
         Utterance.set_system(system)
         
         #use hashing so that if data processed recently, use the processed version
-        arg_hash = hash((data_src, system, punct, action, class_reduct))
+        arg_hash = hash((data_src, system, punct, action, class_reduct, lim))
         if arg_hash in self.cache:
             self.__dict__ = self.cache[arg_hash]
         else:
-            self.get_data(data_src, lim)   
+            self.get_data(data_src, lim, class_reduct)   
             self.__class__.cache[arg_hash] = self.__dict__
 
     def get_data(self, data_src, lim=None, class_reduct=False):
@@ -30,19 +30,20 @@ class ConvHandler:
         base_dir = f'/home/alta/Conversational/OET/al826/2021/data_2/conversations/{data_src}'
         paths = [f'{base_dir}/{i}.json' for i in ['train', 'dev', 'test']]
         train, dev, test = [load_json(i) for i in paths]
-        self.create_label_dict(f'{base_dir}/labels.json')
+        
+        if class_reduct:
+            Utterance.load_label_dict(f'{base_dir}/red_labels.json')
+            Utterance.reduced_dict(f'{base_dir}/red_id_map.json')
+        else:
+            Utterance.load_label_dict(f'{base_dir}/labels.json')
+
+        self.label_dict = Utterance.label_dict
         
         if lim:  train, dev, test = train[:lim], dev[:lim], test[:lim]
         self.train = [Conversation(conv['turns']) for conv in tqdm(train)]
         self.dev   = [Conversation(conv['turns']) for conv in tqdm(dev)] 
         self.test  = [Conversation(conv['turns']) for conv in tqdm(test)] 
         
-    def create_label_dict(self, path):
-        global label_dict
-        label_dict = load_json(path)
-        label_dict = {int(k):v for k, v in label_dict.items()}
-        self.label_dict = label_dict
-
     def get_oet_data(self):
         base_dir = '/home/alta/Conversational/OET/al826/2021/data_2/conversations/oet'
         data = load_json(f'{base_dir}/oet_small.json')
@@ -86,7 +87,7 @@ class Conversation:
         return self.utts[k]
 
 class Utterance:
-    punct, action, tokenizer = True, True, get_tokenizer('bert')
+    punct, action, tokenizer, reduced = True, True, get_tokenizer('bert'), False
 
     def __init__(self, text, speaker=None, label=None, tags=None):
         self.text = text
@@ -96,9 +97,10 @@ class Utterance:
         self.tags = tags
         self.ids = self.tokenizer(self.text).input_ids
 
-                    
         if label != None:
-            self.label_name = label_dict[label]
+            if self.reduced:
+                self.label = self.id_map[label]
+            self.label_name = self.label_dict[self.label]
             
     def clean_text(self):
         if not self.action:
@@ -119,6 +121,17 @@ class Utterance:
     @classmethod
     def set_system(cls, system):
             cls.tokenizer = get_tokenizer(system)
+
+    @classmethod
+    def load_label_dict(cls, path):
+        label_dict = load_json(path)
+        cls.label_dict = {int(k):v for k, v in label_dict.items()}
+        
+    @classmethod
+    def reduced_dict(cls, path):
+        cls.reduced = True
+        id_map = load_json(path)
+        cls.id_map = {int(k):v for k, v in id_map.items()}
 
     def __repr__(self):
         return self.text
