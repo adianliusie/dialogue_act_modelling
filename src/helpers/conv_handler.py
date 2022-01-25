@@ -40,22 +40,43 @@ class ConvHandler:
         self.label_dict = Utterance.label_dict
         
         if lim:  train, dev, test = train[:lim], dev[:lim], test[:lim]
-        self.train = [Conversation(conv['turns']) for conv in tqdm(train)]
-        self.dev   = [Conversation(conv['turns']) for conv in tqdm(dev)] 
-        self.test  = [Conversation(conv['turns']) for conv in tqdm(test)] 
+        self.train = [Conversation(conv) for conv in tqdm(train)]
+        self.dev   = [Conversation(conv) for conv in tqdm(dev)] 
+        self.test  = [Conversation(conv) for conv in tqdm(test)] 
         
     def get_oet_data(self):
         base_dir = '/home/alta/Conversational/OET/al826/2021/data_2/conversations/oet'
         data = load_json(f'{base_dir}/oet_small.json')
-        self.train = [Conversation(conv['turns']) for conv in tqdm(data)]
+        self.train = [Conversation(conv) for conv in tqdm(data)]
 
+    def __getitem__(self, x):
+        x = str(x)
+        if hasattr(self, 'train'):
+            for conv in self.train:
+                if conv.id == x: return conv
+        if hasattr(self, 'dev'):
+            for conv in self.dev:
+                if conv.id == x: return conv
+        if hasattr(self, 'test'):
+            for conv in self.test:
+                if conv.id == x: 
+                    return conv
+        else:
+            print('conversation not found')
+            return None
+                  
 class Conversation:
     def __init__(self, data):
         self.data = data
+        self.id = str(self.data['conv_id'])
         
-        self.utts  = [Utterance(**utt) for utt in self.data]
+        self.utts  = [Utterance(**utt) for utt in self.data['turns']]
         self.turns = self.make_turns()
- 
+        
+        for key, value in data.items():
+            if key != 'turns':
+                setattr(self, key, value)
+                
     def make_turns(self):
         turns = []
         prev_speaker = None
@@ -65,8 +86,11 @@ class Conversation:
             if utt.speaker != prev_speaker:                    
                 if len(turn['text'])>0:             
                     turn_obj = Utterance(**turn)
-                    turns.append(turn_obj) 
-                    assert turn_obj.ids[1:-1] == flatten(turn['tags']['ids'])
+                    if len(turn_obj.ids) < 512:                    
+                        turns.append(turn_obj) 
+                        assert turn_obj.ids[1:-1] == flatten(turn['tags']['ids'])
+                    else:
+                        print('skipped')
 
                 turn = {'text':'', 'speaker':utt.speaker, 'tags':{'segs':[], 'labels':[], 'ids':[]}}
                 

@@ -2,6 +2,8 @@ import torch
 import torch.nn.functional as F
 import numpy as np
 from sklearn.metrics import precision_recall_curve
+from types import SimpleNamespace
+import matplotlib.pyplot as plt
 
 from .helpers import ConvHandler, BatchHandler, Logger
 from .models import FlatTransModel, SpanModel, HierModel, AutoRegressiveModel, FlatSegModel
@@ -9,6 +11,8 @@ from .utils import no_grad, toggle_grad, LossFunctions
 
 class ExperimentHandler:
     def __init__(self, system_cfg):
+        self.device = torch.device(system_cfg.device) if torch.cuda.is_available() else torch.device('cpu')
+
         load = system_cfg.load
 
         self.L = Logger(system_cfg)
@@ -21,8 +25,6 @@ class ExperimentHandler:
         self.seg_model = FlatSegModel(self.system)
         if load: self.load_models()
         self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len_conv, system_cfg.max_len_utts)
-
-        self.device = torch.device(system_cfg.device) if torch.cuda.is_available() else torch.device('cpu')
 
         self.cross_loss = torch.nn.CrossEntropyLoss()
         self.BCE_loss = torch.nn.BCELoss(reduction='none')
@@ -84,7 +86,7 @@ class ExperimentHandler:
                     self.L.log(f'{k:<5}  {logger[0]/config.print_len:.3f}    {logger[1]/logger[2]:.3f}')
                     logger = np.zeros(3)
                 
-            preds, labels = self.eval_act(config, mode='dev')
+            preds, labels = self.act_eval(config, mode='dev')
             decision = np.argmax(preds, axis=-1)
             acc = sum(decision==labels)/len(decision)
             
@@ -96,7 +98,7 @@ class ExperimentHandler:
         self.load_act_model('best_epoch')
     
     @no_grad
-    def eval_act(self, config, mode='test'):
+    def act_eval(self, config, mode='test'):
         data_set = self.select_data(config, mode)
         self.to(self.device)
         
@@ -139,7 +141,7 @@ class ExperimentHandler:
                 logger = np.zeros(6)
 
     @no_grad
-    def eval_seg(self, config, mode='test'):
+    def seg_eval(self, config, mode='test'):
         data_set = self.select_data(config, mode)
         self.to(self.device)
     
@@ -153,11 +155,12 @@ class ExperimentHandler:
 
     ########  Methods For Cascade Segmentation and Act Classification ########
     @no_grad
-    def pred_conv_act(self, config, mode='train'):
-        seg_ids, _align, _segs, turn_len = self.eval_conv_seg(config, mode)
+    def cascade_act_pred(self, config, mode='train'):
+        seg_probs = self.turn_seg_probs(config, mode)
+        ids, _align, _acts, turn_len, _ = self.turn_seg(seg_probs)
         
         output = []
-        for conv in self.B.cascade_act(seg_ids, _align, _segs):
+        for conv in self.B.cascade_act(ids, _align, _acts):
             conv_act_pred = []
             for batch in conv:
                 y = self.act_model(batch.ids, batch.mask)
@@ -165,12 +168,15 @@ class ExperimentHandler:
                 conv_act_pred += pred.cpu().tolist()
             output.append(conv_act_pred)
         
-        return seg_ids, output, turn_len
+        return ids, output, turn_len
     
     @no_grad
-    def eval_conv_act(self, config, mode='test'):
-        ids, align, acts, _ = self.eval_conv_seg(config, mode)
+    def cascade_act_eval(self, config, mode='test', thresh=0.5):
+        seg_probs = self.turn_seg_probs(config, mode)
+        ids, align, acts, _, perf = self.turn_seg(seg_probs, thresh)
         
+        self.L.log(f'TURN SEG     P:{perf[0]:.3f}     R:{perf[1]:.3f}')
+
         predicted_probs, labels = [], []
         for conv in self.B.cascade_act(ids, align, acts):
             for batch in conv:
@@ -180,49 +186,78 @@ class ExperimentHandler:
                 labels += batch.labels
         return predicted_probs, labels
     
-    @no_grad
-    def eval_conv_seg(self, config, mode='test'):  
-        data_set = self.select_data(config, mode)
-        pairs = lambda x: [(x[i], x[i+1]) for i in range(len(x)-1)]
-        batch_pair = lambda x: [pairs(seg_change) for seg_change in x]
+    def exact_seg_eval(self, config, mode='test'):
+        seg_probs = self.turn_seg_probs(config, mode)
+        P, R, T = [], [], []
         
-        ids, align, acts, turn_len, utt_count,  = [], [], [], [], 0
-        for conv_num, conv in enumerate(self.B.cascade_seg(data_set), start=1):
+        for thresh in np.arange(0, 1.00, 0.01):
+            _, _, _, _, (p, r) = self.turn_seg(seg_probs, thresh)
+            if p!=0 or r!=0:
+                P.append(p), R.append(r), T.append(thresh)
+
+        plt.plot(R, P)
+        plt.xlabel('Recall', size=14)
+        plt.ylabel('Precision', size=14)
+
+        for p, r, t in zip(P[::25], R[::25], T[::25]):
+            plt.scatter(r, p, marker='x', color='r')
+            plt.text(r, p, round(t,2), color='r')          
+        
+        F1 = [((2*p*r)/(p+r), p, r, t) for p, r, t in zip(P, R, T)]
+        op = max(F1)
+        print(f'operating point: {op[3]:.2f}   P: {op[1]:.3f}   R: {op[2]:.3f}  F1: {op[0]:.3f}')
+        return max(F1)[1]
+    
+    def turn_seg(self, turn_data, thresh=0.5):
+        pairs = lambda x: [(x[i], x[i+1]) for i in range(len(x)-1)]
+        
+        ids, align, acts, turn_len, cases = [], [], [], [], 0
+        for conv in turn_data:
             conv_ids, conv_align, conv_acts, conv_turn_len = [], [], [], []
-            for batch in conv:
-                y = self.seg_model(batch.ids, batch.mask)
-
-                # for each turn, determine utterance start/end position
-                decisions = [[1] for _ in range(len(y))]
-                for i, j in (y>0.5).nonzero(as_tuple=False):
-                    if j < batch.mask[i].sum():
-                        decisions[i].append(int(j))
-                seg_pred = batch_pair(decisions)
+            for turn in conv:
+                decisions = [1] + list((turn.probs > thresh).nonzero()[0])
+                segments = pairs(decisions)
+                for start, end in segments:
+                    segment = turn.ids[start:end]
+                    conv_ids.append([101] + segment.tolist() + [102])
+                conv_turn_len.append(len(segments))
                 
-                for k, turn in enumerate(batch.ids):
-                    for start, end in seg_pred[k]:
-                        segment = turn[start:end]
-                        conv_ids.append([101] + segment.tolist() + [102])
-                    conv_turn_len.append(len(seg_pred[k]))
-                    
-                #Evaluate if labels are available
-                if batch.segs:  
-                    seg_labels = batch_pair(batch.segs)
-                    for k, turn in enumerate(batch.ids):
-                        for start, end in seg_pred[k]:
-                            conv_align.append((start, end) in seg_labels[k])
-                            if conv_align[-1]: conv_acts.append(batch.act_dict[k][end])
-                            else:              conv_acts.append(-1)
-                    utt_count += sum([1 for turn in seg_labels for utt in turn])
-
+                if turn.segs:  
+                    seg_labels = pairs(turn.segs)
+                    for start, end in segments:
+                        conv_align.append((start, end) in seg_labels)
+                        if conv_align[-1]: conv_acts.append(turn.act_dict[end])
+                        else:              conv_acts.append(-1)
+                    cases += len(seg_labels)
+            
             ids.append(conv_ids), align.append(conv_align), acts.append(conv_acts), turn_len.append(conv_turn_len)
 
-        if batch.segs:
+        if turn.segs:
             hits = sum([sum(x) for x in align])
             preds = sum([len(x) for x in align])
-            self.L.log(f'SEG  P:{hits/preds:.3f}   R:{hits/utt_count:.3f}')
+            if (preds != 0) and (hits != 0): perf = (hits/preds, hits/cases)
+            else:                            perf = (0, 0)
             
-        return ids, align, acts, turn_len
+        return ids, align, acts, turn_len, perf
+    
+    @no_grad
+    def turn_seg_probs(self, config, mode='test'):  
+        data_set = self.select_data(config, mode)
+        self.to(self.device)
+
+        output = []
+        for conv in self.B.cascade_seg(data_set):
+            conv_turns = []
+            for batch in conv:
+                y = self.seg_model(batch.ids, batch.mask).cpu().numpy()
+                for ids, mask, probs, segs, label, act_dict \
+                in zip(batch.ids, batch.mask, y, batch.segs, batch.labels, batch.act_dict):
+                    mask_len = int(sum(mask))
+                    ids, probs = ids[:mask_len], probs[:mask_len]
+                    turn = {'ids':ids, 'probs':probs, 'segs':segs, 'label':label, 'act_dict':act_dict}       
+                    conv_turns.append(SimpleNamespace(**turn))
+            output.append(conv_turns)
+        return output
 
     #############    GENERAL UTILITIES     #############
     def select_data(self, config, mode):
@@ -237,6 +272,7 @@ class ExperimentHandler:
 
         self.tokenizer = D.tokenizer
         self.label_dict = D.label_dict
+        self.label_dict[-1] = 'missed'
         
     def save_models(self, name='base'):
         self.save_act_model(name)

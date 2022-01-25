@@ -8,20 +8,26 @@ from collections import Counter
 import numpy as np
 import time
 
+from .alignment import Levenshtein
+
 class MutliClassEval:
     def __init__(self, preds, labels):
         self.preds, self.labels = preds, labels
         self.num_classes = len(preds[0])
-        self.class_perfs = self.one_vs_all_eval()
-        self.thresholds = np.array([act.op_point[0] for act in self.class_perfs])
 
-    def one_vs_all_eval(self):
-        classes = []
-        for k in range(self.num_classes):
-            class_preds, class_labels = single_class(self.preds, self.labels, k)
-            classes.append(BinaryEval(class_preds, class_labels))
-        return classes
+    def misaligned_eval(self):        
+        results = np.zeros(5)
+        for conv_pred, lab in zip(self.preds, self.labels):
+            decision = np.argmax(conv_pred, axis=-1)            
+            errors, decisions = Levenshtein.lev_dist(decision, lab)
+            err_cou = Counter(decisions)
+            subs, inserts, deletes = (err_cou[i] for i in ['r', 'i', 'd'])
+            
+            results += [len(lab), errors, subs, inserts, deletes]
 
+        print(f"WER:{results[1]/results[0]:.3f}  replace:{results[2]/results[1]:.3f}  ",
+              f"inserts: {results[3]/results[1]:.3f}  deletion: {results[4]/results[1]:.3f}")
+            
     def classification_report(self, detail=False, names=None):
         decision = np.argmax(self.preds, axis=-1)
         labels = self.labels
@@ -50,10 +56,13 @@ class MutliClassEval:
             print()
         print(summary)
         
-    def op_point_eval(self):
+    def one_vs_all_eval(self):
+        class_perfs = self._one_vs_all_eval()
+        thresholds = np.array([act.op_point[0] for act in class_perfs])
+
         hits_dist, score_thresh = [], 0
         for pred, lab in zip(self.preds, self.labels):
-            hits = np.array(pred) > self.thresholds
+            hits = np.array(pred) > thresholds
             hits_dist.append(sum(hits))
             if sum(hits) > 0:
                 score_thresh += hits[lab]/sum(hits)
@@ -64,14 +73,16 @@ class MutliClassEval:
         plt.show()
 
     def plot_class_curves(self):
+        class_perfs = self._one_vs_all_eval()
+        thresholds = np.array([act.op_point[0] for act in class_perfs])
+
         sns.set_theme()
-        precisions = np.array([act.op_point[2] for act in self.class_perfs])
-        recalls = np.array([act.op_point[3] for act in self.class_perfs])
-        frequencies = np.array([sum(act.labels) for act in self.class_perfs])
-        colors = cm.rainbow(np.linspace(0, 1, len(self.class_perfs)))
+        precisions = np.array([act.op_point[2] for act in class_perfs])
+        recalls = np.array([act.op_point[3] for act in class_perfs])
+        frequencies = np.array([sum(act.labels) for act in class_perfs])
+        colors = cm.rainbow(np.linspace(0, 1, len(class_perfs)))
 
         ax = iso_F1()
-        print(colors)
         ax.scatter(precisions, recalls, color=colors, marker='x')
         plt.show()
     
@@ -82,6 +93,13 @@ class MutliClassEval:
         ax.set_xscale("log")
         ax.set_xlim([0.5,2*max(frequencies)])
         plt.show()
+
+    def _one_vs_all_eval(self):
+        classes = []
+        for k in range(self.num_classes):
+            class_preds, class_labels = single_class(self.preds, self.labels, k)
+            classes.append(BinaryEval(class_preds, class_labels))
+        return classes
 
     def __getitem__(self, k):
         return self.class_perfs[k]

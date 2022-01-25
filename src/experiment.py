@@ -11,6 +11,8 @@ from .utils import no_grad, toggle_grad, LossFunctions
 
 class ExperimentHandler:
     def __init__(self, system_cfg):
+        self.device = torch.device(system_cfg.device) if torch.cuda.is_available() else torch.device('cpu')
+
         load = system_cfg.load
 
         self.L = Logger(system_cfg)
@@ -23,8 +25,6 @@ class ExperimentHandler:
         self.seg_model = FlatSegModel(self.system)
         if load: self.load_models()
         self.B = BatchHandler(system_cfg.mode, system_cfg.mode_arg, system_cfg.max_len_conv, system_cfg.max_len_utts)
-
-        self.device = torch.device(system_cfg.device) if torch.cuda.is_available() else torch.device('cpu')
 
         self.cross_loss = torch.nn.CrossEntropyLoss()
         self.BCE_loss = torch.nn.BCELoss(reduction='none')
@@ -158,7 +158,7 @@ class ExperimentHandler:
     def cascade_act_pred(self, config, mode='train'):
         seg_probs = self.turn_seg_probs(config, mode)
         ids, _align, _acts, turn_len, _ = self.turn_seg(seg_probs)
-                
+        
         output = []
         for conv in self.B.cascade_act(ids, _align, _acts):
             conv_act_pred = []
@@ -167,24 +167,29 @@ class ExperimentHandler:
                 pred = torch.argmax(y, dim=-1)
                 conv_act_pred += pred.cpu().tolist()
             output.append(conv_act_pred)
-        
+
         return ids, output, turn_len
     
     @no_grad
     def cascade_act_eval(self, config, mode='test', thresh=0.5):
-        seg_probs = self.turn_seg_probs(config, mode)
-        ids, align, acts, _, perf = self.turn_seg(seg_probs, thresh)
-        
+        seg_output = self.turn_seg_probs(config, mode)
+        ids, align, acts, _, perf = self.turn_seg(seg_output, thresh)
         self.L.log(f'TURN SEG     P:{perf[0]:.3f}     R:{perf[1]:.3f}')
-
-        predicted_probs, labels = [], []
+            
+        #super unreadable but gets the act labels for all convs
+        labels = [ [v for turn in conv for k, v in sorted(turn.act_dict.items())] 
+                      for conv in seg_output]
+        
+        predicted_probs, align_labels = [], []
         for conv in self.B.cascade_act(ids, align, acts):
+            act_pred, conv_lab = [], []
             for batch in conv:
                 y = self.act_model(batch.ids, batch.mask)
                 pred_prob = F.softmax(y, dim=-1)
-                predicted_probs += pred_prob.cpu().tolist()
-                labels += batch.labels
-        return predicted_probs, labels
+                act_pred += pred_prob.cpu().tolist()
+                conv_lab += batch.labels
+            predicted_probs.append(act_pred), align_labels.append(conv_lab)
+        return predicted_probs, labels, align_labels
     
     def exact_seg_eval(self, config, mode='test'):
         seg_probs = self.turn_seg_probs(config, mode)
@@ -208,6 +213,27 @@ class ExperimentHandler:
         print(f'operating point: {op[3]:.2f}   P: {op[1]:.3f}   R: {op[2]:.3f}  F1: {op[0]:.3f}')
         return max(F1)[1]
     
+    @no_grad
+    def turn_seg_probs(self, config, mode='test'):  
+        data_set = self.select_data(config, mode)
+        self.to(self.device)
+
+        output = []
+        for conv in self.B.cascade_seg(data_set):
+            conv_turns = []
+            for batch in conv:
+                #predict phrase starts using segmentation model
+                y = self.seg_model(batch.ids, batch.mask).cpu().numpy()
+                for ids, mask, probs, segs, label, act_dict \
+                in zip(batch.ids, batch.mask, y, batch.segs, batch.labels, batch.act_dict):
+                    mask_len = int(sum(mask))
+                    ids, probs = ids[:mask_len], probs[:mask_len]
+                    turn = {'ids':ids, 'probs':probs, 'segs':segs, 'seg_label':label, 'act_dict':act_dict}       
+                    conv_turns.append(SimpleNamespace(**turn))
+            output.append(conv_turns)
+        return output
+    
+    # processes segmentation predictions to return phrases, whether it matches, and act labels
     def turn_seg(self, turn_data, thresh=0.5):
         pairs = lambda x: [(x[i], x[i+1]) for i in range(len(x)-1)]
         
@@ -239,25 +265,6 @@ class ExperimentHandler:
             else:                            perf = (0, 0)
             
         return ids, align, acts, turn_len, perf
-    
-    @no_grad
-    def turn_seg_probs(self, config, mode='test'):  
-        data_set = self.select_data(config, mode)
-        self.to(self.device)
-
-        output = []
-        for conv in self.B.cascade_seg(data_set):
-            conv_turns = []
-            for batch in conv:
-                y = self.seg_model(batch.ids, batch.mask).cpu().numpy()
-                for ids, mask, probs, segs, label, act_dict \
-                in zip(batch.ids, batch.mask, y, batch.segs, batch.labels, batch.act_dict):
-                    mask_len = int(sum(mask))
-                    ids, probs = ids[:mask_len], probs[:mask_len]
-                    turn = {'ids':ids, 'probs':probs, 'segs':segs, 'label':label, 'act_dict':act_dict}       
-                    conv_turns.append(SimpleNamespace(**turn))
-            output.append(conv_turns)
-        return output
 
     #############    GENERAL UTILITIES     #############
     def select_data(self, config, mode):
