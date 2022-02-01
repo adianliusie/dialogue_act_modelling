@@ -1,24 +1,6 @@
-class Levenshtein:
-    @classmethod
-    def align_texts(cls, pred_text, ref_text):
-        dist, path = cls.lev_dist(pred_text, ref_text)
-        pred_text, ref_text = pred_text.copy(), ref_text.copy()
-        aligned = ['']
-        
-        for step in path:
-            if step in ['_', 'r']:
-                dec, _ = pred_text.pop(0), ref_text.pop(0)
-                aligned.append(dec)
-            elif step == 'd':
-                dec = pred_text.pop(0)
-                aligned[-1] += (' '+dec)
-            elif step == 'i':
-                dec = ref_text.pop(0)
-                aligned.append('')
-        aligned[0] += ' ' + aligned.pop(1)
-        aligned[0] = aligned[0].strip()
-        return aligned   
+from collections import Counter
 
+class Levenshtein:
     @staticmethod
     def lev_dist(pred_text, ref_text):
         past_states = set()       # keeps track of all states visited
@@ -93,3 +75,54 @@ class Levenshtein:
         memo = {}                       #initilise the memoized data
         dist, path = levenshtine(0, 0)  #begin algorithm at the start
         return (dist, path)
+    
+    @classmethod
+    def align_text(cls, pred_text, ref_text):
+        dist, path = cls.lev_dist(pred_text, ref_text)
+        pred_text, ref_text = pred_text.copy(), ref_text.copy()
+        aligned = ['']
+        
+        for step in path:
+            if step in ['_', 'r']:
+                dec, _ = pred_text.pop(0), ref_text.pop(0)
+                aligned.append(dec)
+            elif step == 'd':
+                dec = pred_text.pop(0)
+                aligned[-1] += (' '+dec)
+            elif step == 'i':
+                dec = ref_text.pop(0)
+                aligned.append('')
+        aligned[0] += ' ' + aligned.pop(1)
+        aligned[0] = aligned[0].strip()
+        return aligned   
+
+    @classmethod
+    def wer(cls, pred_text, ref_text, report=False)->tuple:        
+        dist, path = cls.lev_dist(pred_text, ref_text)
+
+        err_counts = Counter(path)
+        rep, ins, dels = (err_counts[i] for i in ['r', 'i', 'd'])
+        if report:
+            print(f"WER:{dist/len(ref_text):.3f}  replace:{rep/len(ref_text):.3f}  ",
+                  f"inserts: {ins/len(ref_text):.3f}  deletion: {dels/len(ref_text):.3f}")
+        return (dist, rep, ins, dels)
+
+    @classmethod
+    def detailed_errors(cls, pred_text, ref_text)->list:
+        dist, path = cls.lev_dist(pred_text, ref_text)
+        pred_text, ref_text = pred_text.copy(), ref_text.copy()
+        
+        errors = []
+        for step in path:
+            if step == '_':
+                pred_text.pop(0), ref_text.pop(0)
+            elif step == 'r':
+                pred_word, ref_word = pred_text.pop(0), ref_text.pop(0)
+                errors.append(('r', pred_word, ref_word))
+            elif step == 'd':
+                err_word = pred_text.pop(0)
+                errors.append(('d', err_word, None))
+            elif step == 'i':
+                err_word = ref_text.pop(0)
+                errors.append(('i', None, err_word))
+        return errors   

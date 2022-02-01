@@ -13,7 +13,7 @@ class Logger:
     def __init__(self, system_cfg):
         if system_cfg.load:
             self.exp_name = system_cfg.exp_name
-            system_cfg = self.system_cfg 
+            self.system_cfg = system_cfg 
             self.log = self.make_logger(file_name='log_2')
         else:
             if not system_cfg.save:
@@ -24,8 +24,8 @@ class Logger:
                 
             self.make_dir()
             self.save_config('system_cfg', system_cfg) 
-            self.log = self.make_logger()
-            self.record = self.make_logger(record=True)
+            self.log = self.make_logger(file_name='log')
+            self.record = self.make_logger(file_name='record', record=True)
 
     def del_temp_dir(self):
         if os.path.isdir(f'{BASE_DIR}/temp'): shutil.rmtree(f'{BASE_DIR}/temp')        
@@ -34,15 +34,12 @@ class Logger:
         os.makedirs(self.path)
         os.mkdir(f'{self.path}/models')
 
-    def save_config(self, config_name, config):
-        config_path = f'{self.path}/{config_name}.json'
+    def save_config(self, name:str, config:SimpleNamespace):
+        config_path = f'{self.path}/{name}.json'
         with open(config_path, 'x') as jsonFile:
             json.dump(config.__dict__, jsonFile, indent=4)
 
-    def make_logger(self, record=False, file_name=None):
-        if file_name is None:
-            file_name = 'record' if record else 'log'
-            
+    def make_logger(self, file_name, record=False):     
         log_path = f'{self.path}/{file_name}.txt'
         open(log_path, 'a+').close()  
         
@@ -56,10 +53,9 @@ class Logger:
                 f.write('\n')
         return log
                        
-    @property
-    def system_cfg(self):
-        system_cfg = load_json(f'{self.path}/system_cfg.json')
-        return SimpleNamespace(**system_cfg)
+    def load_cfg(self, name:str='system_cfg'):
+        cfg = load_json(f'{self.path}/{name}.json')
+        return SimpleNamespace(**cfg)
 
     @property
     def path(self):

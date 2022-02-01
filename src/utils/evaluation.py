@@ -25,8 +25,8 @@ class MutliClassEval:
             
             results += [len(lab), errors, subs, inserts, deletes]
 
-        print(f"WER:{results[1]/results[0]:.3f}  replace:{results[2]/results[1]:.3f}  ",
-              f"inserts: {results[3]/results[1]:.3f}  deletion: {results[4]/results[1]:.3f}")
+        print(f"WER:{results[1]/results[0]:.3f}  replace:{results[2]/results[0]:.3f}  ",
+              f"inserts: {results[3]/results[0]:.3f}  deletion: {results[4]/results[0]:.3f}")
             
     def classification_report(self, detail=False, names=None):
         decision = np.argmax(self.preds, axis=-1)
